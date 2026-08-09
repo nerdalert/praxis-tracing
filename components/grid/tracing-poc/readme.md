@@ -53,7 +53,7 @@ and real W3C `traceparent` propagation across HTTP boundaries.
 ## Prerequisites
 
 - Rust 1.96+ (`rustup install 1.96.0`)
-- Docker and Docker Compose
+- Docker Compose or Podman Compose
 - Ports 3100-3301, 4317-4318, 16686 available
 
 ## Quick start

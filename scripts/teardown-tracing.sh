@@ -3,6 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/compose.sh"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 GRID_DIR="${ROOT_DIR}/components/grid"
 POC_DIR="${GRID_DIR}/tracing-poc"
@@ -43,7 +44,7 @@ fi
 
 if [[ -f "$COMPOSE_FILE" ]]; then
     echo "  Stopping Docker containers..."
-    docker compose -f "$COMPOSE_FILE" down -v 2>/dev/null && {
+    compose -f "$COMPOSE_FILE" down -v 2>/dev/null && {
         echo "  Docker containers stopped"
         stopped=$((stopped + 1))
     } || echo "  No Docker containers to stop"

@@ -3,6 +3,9 @@
 # all Praxis gateway deployments across GLB demo clusters.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/compose.sh"
+
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-docker}"
 COMPOSE_SERVICE="${COMPOSE_SERVICE:-otel-collector}"
 KIND_NETWORK="${KIND_NETWORK:-grid-glb-demo-net}"
@@ -13,7 +16,7 @@ echo "=== GLB OTel Setup ==="
 echo "Run ID: ${RUN_ID}"
 
 # Step 1: Resolve the collector container name from Compose.
-COLLECTOR_CONTAINER=$(docker compose -p "${COMPOSE_PROJECT}" ps -q "${COMPOSE_SERVICE}" 2>/dev/null || true)
+COLLECTOR_CONTAINER=$(compose -p "${COMPOSE_PROJECT}" ps -q "${COMPOSE_SERVICE}" 2>/dev/null || true)
 if [[ -z "${COLLECTOR_CONTAINER}" ]]; then
     COLLECTOR_CONTAINER=$(docker ps --filter "label=com.docker.compose.service=${COMPOSE_SERVICE}" \
         --filter "label=com.docker.compose.project=${COMPOSE_PROJECT}" -q 2>/dev/null | head -1)

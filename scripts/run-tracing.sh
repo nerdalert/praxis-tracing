@@ -17,6 +17,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/compose.sh"
 ROOT_DIR="$(dirname "${SCRIPT_DIR}")"
 GRID_DIR="${ROOT_DIR}/components/grid"
 POC_DIR="${GRID_DIR}/tracing-poc"
@@ -60,7 +61,7 @@ if "${TEARDOWN}"; then
     fi
     # Stop Docker infrastructure
     echo "Stopping Jaeger + OTel Collector..."
-    docker compose -f "${COMPOSE_FILE}" down -v 2>/dev/null || true
+    compose -f "${COMPOSE_FILE}" down -v 2>/dev/null || true
     echo "Done."
     exit 0
 fi
@@ -70,7 +71,7 @@ echo ""
 
 # Start infrastructure
 echo "Starting Jaeger + OTel Collector..."
-docker compose -f "${COMPOSE_FILE}" up -d --wait 2>/dev/null || {
+compose -f "${COMPOSE_FILE}" up -d --wait 2>/dev/null || {
     echo "ERROR: Failed to start Docker infrastructure."
     echo "Make sure Docker is running and ports 4317, 4318, 16686 are free."
     exit 1
