@@ -26,7 +26,7 @@ the Grid and Praxis AI components used to build the experimental images.
 
 Prerequisites: Rust, Docker Compose or Podman Compose, Node.js, and an available
 Jaeger port. The scripts prefer Docker Compose and use Podman Compose only when
-Docker Compose is unavailable. Set `COMPOSE_COMMAND` to choose explicitly.
+Docker Compose is unavailable. Set `COMPOSE_RUNTIME` to choose explicitly.
 
 ```console
 ./scripts/run-tracing.sh --poc quick
