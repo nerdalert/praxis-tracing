@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Grid Routing Observability</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <h1>Grid Routing Observability</h1>
+      <span class="subtitle">AI Grid — GLB Routing Observability</span>
+    </div>
+    <div class="header-right">
+      <div id="source-badge" class="badge badge-source">GLB</div>
+      <div id="mode-badge" class="badge badge-unknown">LOADING</div>
+      <div class="source-controls">
+        <button id="btn-src-glb" class="source-btn active" onclick="setDataSource('glb')">GLB</button>
+        <button id="btn-src-vcr" class="source-btn" onclick="setDataSource('vcr')">VCR/EPP</button>
+        <button id="btn-src-combined" class="source-btn" onclick="setDataSource('combined')">Combined</button>
+      </div>
+      <div class="mode-controls">
+        <button id="btn-auto" class="mode-btn active" onclick="setMode('auto')">Auto</button>
+        <button id="btn-live" class="mode-btn" onclick="setMode('live')">Live</button>
+        <button id="btn-demo" class="mode-btn" onclick="setMode('demo')">Demo</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Scenario Controls (demo mode) -->
+    <section id="scenario-bar" class="scenario-bar hidden">
+      <span class="scenario-label">Scenario:</span>
+      <div id="scenario-buttons" class="scenario-buttons"></div>
+      <span id="scenario-desc" class="scenario-desc"></span>
+    </section>
+
+    <!-- Live request generator -->
+    <section id="request-generator" class="request-generator">
+      <div class="request-generator-header">
+        <div>
+          <h2>Generate Requests</h2>
+          <p>Send real requests through the live GLB gateway and watch traces appear below.</p>
+        </div>
+        <span id="generator-status" class="generator-status">Ready</span>
+      </div>
+      <div class="request-generator-controls">
+        <label>Requests <input id="generator-count" type="number" min="1" max="100" value="10"></label>
+        <label>Rate/sec <input id="generator-rate" type="number" min="0.1" max="20" step="0.1" value="1"></label>
+        <label class="prompt-field">Prompt <input id="generator-prompt" type="text" maxlength="500" value="dashboard observability request"></label>
+        <button id="generator-start" class="primary-btn" onclick="startRequestGeneration()">Generate requests</button>
+        <button id="generator-cancel" class="secondary-btn hidden" onclick="cancelRequestGeneration()">Stop</button>
+      </div>
+      <div id="generator-progress" class="generator-progress" aria-live="polite">No requests generated yet.</div>
+      <div id="generator-attribution" class="generator-attribution" aria-live="polite">Observed trace attribution will appear here.</div>
+    </section>
+
+    <!-- Topology -->
+    <section class="topology-section">
+      <h2>Request Flow</h2>
+      <div id="topology" class="topology-strip"></div>
+      <div class="topology-legend">
+        <span class="legend-item"><span class="legend-line solid"></span> Traced</span>
+        <span class="legend-item"><span class="legend-line dashed"></span> Functional only</span>
+        <span class="legend-item"><span class="legend-line muted"></span> Eligible</span>
+      </div>
+    </section>
+
+    <!-- Provider Cards -->
+    <section class="pools-section">
+      <div class="section-heading-row">
+        <div>
+          <h2>Providers</h2>
+          <p class="section-help">Live values refresh from EPP. Watch queue pressure rise, score fall, rank change, and traffic follow the new winner.</p>
+        </div>
+        <span id="provider-refresh-state" class="refresh-state">Waiting for live data</span>
+      </div>
+      <div id="pool-cards" class="pool-cards">
+        <div class="pool-card placeholder">Loading...</div>
+      </div>
+    </section>
+
+    <!-- Routing State -->
+    <section class="routing-section">
+      <h2>Routing State</h2>
+      <div id="routing-state" class="routing-state">
+        <div class="routing-row">
+          <span class="routing-key">Policy</span>
+          <span id="routing-policy" class="routing-value">—</span>
+        </div>
+        <div class="routing-row">
+          <span class="routing-key">Selected Pool</span>
+          <span id="routing-selected" class="routing-value">—</span>
+        </div>
+        <div class="routing-row">
+          <span class="routing-key">Decision</span>
+          <span id="routing-decision" class="routing-value">—</span>
+        </div>
+        <div class="routing-row">
+          <span class="routing-key">Score</span>
+          <span id="routing-score" class="routing-value">—</span>
+        </div>
+        <div class="routing-row">
+          <span class="routing-key">Overlay Revision</span>
+          <span id="routing-revision" class="routing-value">—</span>
+        </div>
+        <div class="routing-row">
+          <span class="routing-key">Admission State</span>
+          <span id="routing-admission" class="routing-value">—</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Causal Pressure Chain -->
+    <section class="causal-section">
+      <h2>Pressure Narrative</h2>
+      <div id="causal-chain" class="causal-chain">
+        <div class="empty-state">Waiting for data...</div>
+      </div>
+    </section>
+
+    <!-- Causal Timeline -->
+    <section class="timeline-section">
+      <h2>Event Timeline</h2>
+      <div id="timeline" class="timeline-container">
+        <div class="empty-state">No events yet</div>
+      </div>
+    </section>
+
+    <!-- Score Visualization -->
+    <section class="scores-section">
+      <h2>Score Breakdown</h2>
+      <div id="score-bars" class="score-bars"></div>
+    </section>
+
+    <!-- Trace Table -->
+    <section class="traces-section">
+      <div class="traces-header">
+        <h2>Recent Traces</h2>
+        <div class="source-filter">
+          <button class="filter-btn active" data-filter="all" onclick="setSourceFilter('all')">All</button>
+          <button class="filter-btn" data-filter="praxis" onclick="setSourceFilter('praxis')">Praxis</button>
+          <button class="filter-btn" data-filter="synthetic" onclick="setSourceFilter('synthetic')">Synthetic</button>
+        </div>
+      </div>
+      <div class="traces-table-wrap">
+        <table id="traces-table" class="traces-table">
+          <thead>
+            <tr>
+              <th>Trace ID</th>
+              <th>Cluster</th>
+              <th>Score</th>
+              <th>Duration</th>
+              <th>Spans</th>
+              <th>Source</th>
+              <th>Propagation</th>
+              <th>Time</th>
+            </tr>
+          </thead>
+          <tbody id="traces-body">
+            <tr><td colspan="8" class="empty-state">No traces yet</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Provider Inspector Panel -->
+    <section id="provider-inspector" class="inspector-panel hidden">
+      <div class="inspector-header">
+        <h2>Provider Inspector</h2>
+        <button class="close-btn" onclick="closeInspector()">Close</button>
+      </div>
+      <div id="inspector-content" class="inspector-content">
+        <div class="empty-state">Select a provider card to inspect</div>
+      </div>
+    </section>
+
+    <!-- Trace Detail Panel -->
+    <section id="trace-detail" class="trace-detail hidden">
+      <div class="trace-detail-header">
+        <h2>Trace Detail</h2>
+        <button class="close-btn" onclick="closeTraceDetail()">Close</button>
+      </div>
+      <div id="trace-detail-content" class="trace-detail-content">
+        <div class="empty-state">Select a trace to view details</div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span>Grid Routing Observability UI</span>
+    <span id="footer-jaeger"></span>
+    <span id="footer-refresh">Refreshing every 3s</span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

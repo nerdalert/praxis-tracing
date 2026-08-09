@@ -1,0 +1,8 @@
+apiVersion: grid.praxis-proxy.io/v1alpha1
+kind: GridSite
+metadata:
+  name: west-edge
+spec:
+  gridNetworkRef: glb-demo
+  region: west
+  zone: west-edge-1

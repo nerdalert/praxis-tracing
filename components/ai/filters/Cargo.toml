@@ -1,0 +1,58 @@
+[package]
+name = "praxis-ai-filters"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "AI filter implementations for Praxis"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "praxis_ai_filters"
+
+[features]
+default = ["apis"]
+apis = ["praxis-ai-apis/default"]
+otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:tracing-opentelemetry"]
+praxis-main = []
+
+[lints]
+workspace = true
+
+[dependencies]
+arc-swap = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+dashmap = { workspace = true }
+futures = { workspace = true }
+http = { workspace = true }
+metrics = { workspace = true }
+notify = { workspace = true }
+praxis-ai-apis = { workspace = true }
+praxis-core = { workspace = true }
+praxis-filter = { workspace = true }
+reqwest.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_json_canonicalizer = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+zeroize = { workspace = true }
+
+# OpenTelemetry (feature-gated)
+opentelemetry = { version = "0.29", optional = true }
+opentelemetry_sdk = { version = "0.29", optional = true }
+tracing-opentelemetry = { version = "0.30", optional = true }
+
+[dev-dependencies]
+metrics-util = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+wiremock = { workspace = true }

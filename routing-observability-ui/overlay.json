@@ -1,0 +1,99 @@
+{
+  "schema_version": "1.0.0",
+  "revision": {
+    "kind": "content_addressed",
+    "algorithm": "sha256",
+    "value": "00a88619f65e858af14dafac1e439812663cbf0e55e4c99d6962ab91267f87ce"
+  },
+  "content_digest": {
+    "algorithm": "sha256",
+    "value": "00a88619f65e858af14dafac1e439812663cbf0e55e4c99d6962ab91267f87ce"
+  },
+  "scope": {
+    "network": "glb-demo",
+    "gateway": "edge-gateway",
+    "namespace": "grid-system",
+    "local_site": "east-edge"
+  },
+  "provenance": {
+    "producer": "grid-operator",
+    "producer_version": "0.1.2",
+    "source_name": "glb-demo",
+    "source_uid": "80697ab7-d061-4fcc-9b49-abb64ebc6fc8",
+    "source_generation": 1,
+    "rendered_at": "2026-08-08T20:29:36.229799789Z"
+  },
+  "overlay": {
+    "network": "glb-demo",
+    "local_site": "east-edge",
+    "candidates": [
+      {
+        "kind": "inference_model",
+        "name": "sim-model-v1",
+        "site": "east-provider",
+        "cluster": "sim-east-provider",
+        "fresh": true,
+        "stable_id": "84f799fe",
+        "admission_state": "new_and_existing",
+        "selection_tier": "same_region",
+        "score": 0.0,
+        "score_breakdown": {
+          "locality": 0.0,
+          "queue_depth": 0.0,
+          "kv_cache": 0.0,
+          "prefix_cache": 0.0,
+          "latency": 0.0,
+          "cost": 0.0,
+          "total": 0.0
+        },
+        "rank": 0,
+        "selection_group": 0
+      },
+      {
+        "kind": "inference_model",
+        "name": "sim-model-v1",
+        "site": "east-provider",
+        "cluster": "sim-east-provider-secondary",
+        "fresh": true,
+        "stable_id": "eaf38b2d",
+        "admission_state": "new_and_existing",
+        "selection_tier": "same_region",
+        "score": 0.0,
+        "score_breakdown": {
+          "locality": 0.0,
+          "queue_depth": 0.0,
+          "kv_cache": 0.0,
+          "prefix_cache": 0.0,
+          "latency": 0.0,
+          "cost": 0.0,
+          "total": 0.0
+        },
+        "rank": 1,
+        "selection_group": 0
+      },
+      {
+        "kind": "inference_model",
+        "name": "sim-model-v1",
+        "site": "west-provider",
+        "cluster": "sim-west-provider",
+        "fresh": true,
+        "stable_id": "9b5417da",
+        "admission_state": "new_and_existing",
+        "selection_tier": "cross_region",
+        "score": 0.0,
+        "score_breakdown": {
+          "locality": 0.0,
+          "queue_depth": 0.0,
+          "kv_cache": 0.0,
+          "prefix_cache": 0.0,
+          "latency": 0.0,
+          "cost": 0.0,
+          "total": 0.0
+        },
+        "rank": 2,
+        "selection_group": 1
+      }
+    ],
+    "generated_at": "2026-08-08T20:29:36.229799789Z"
+  }
+}

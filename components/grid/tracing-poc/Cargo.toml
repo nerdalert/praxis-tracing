@@ -1,0 +1,53 @@
+[package]
+name = "tracing-poc"
+description = "OpenTelemetry + Jaeger tracing proof-of-concept for the AI Grid"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "tracing-poc"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace crates
+scoring = { path = "../scoring" }
+
+# HTTP framework
+axum = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+tower = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true, features = ["sync"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Logging / tracing
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# HTTP client (for proxy forwarding and Jaeger API queries)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# OpenTelemetry
+opentelemetry = "0.29"
+opentelemetry_sdk = { version = "0.29", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.29" }
+tracing-opentelemetry = "0.30"
+
+# CLI argument parsing
+clap = { workspace = true }
+
+[lints]
+workspace = true

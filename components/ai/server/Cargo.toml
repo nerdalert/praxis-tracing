@@ -1,0 +1,61 @@
+[package]
+name = "praxis-ai-proxy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "AI-native proxy server built on Praxis"
+license.workspace = true
+repository.workspace = true
+readme = "../README.md"
+publish = false
+
+[package.metadata.cargo-machete]
+ignored = ["cargo_metadata"]
+
+[lib]
+name = "praxis_ai"
+path = "src/lib.rs"
+
+[[bin]]
+name = "praxis-ai"
+path = "src/main.rs"
+
+[features]
+praxis-main = ["praxis-ai-filters/praxis-main", "praxis-ai-apis/praxis-main"]
+otel = ["praxis-ai-filters/otel", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry", "dep:tracing-subscriber"]
+
+[lints]
+workspace = true
+
+[dependencies]
+clap = { workspace = true }
+notify = { workspace = true }
+praxis-ai-filters = { workspace = true }
+praxis-ai-apis = { workspace = true }
+praxis-core = { workspace = true }
+praxis-filter = { workspace = true }
+praxis-protocol = { workspace = true }
+praxis-tls = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time", "fs"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+# OpenTelemetry (feature-gated)
+opentelemetry = { version = "0.29", optional = true }
+opentelemetry_sdk = { version = "0.29", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.29", features = ["http-proto"], optional = true }
+tracing-opentelemetry = { version = "0.30", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+tikv-jemallocator = { workspace = true }
+
+[build-dependencies]
+cargo_metadata = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

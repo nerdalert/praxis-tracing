@@ -1,0 +1,285 @@
+[workspace]
+resolver = "3"
+members = [
+    "server",
+    "filters",
+    "apis",
+    "xtask",
+    "tests/integration",
+    "tests/schema",
+    "tests/utils",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.96"
+authors = ["Shane Utt <shaneutt@linux.com>"]
+license = "MIT"
+repository = "https://github.com/praxis-proxy/ai"
+
+[workspace.dependencies]
+async-trait = "0.1.91"
+base64 = "0.23.1"
+bytes = "1.12.1"
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+clap = { version = "4.6.6", features = ["derive"] }
+dashmap = "6.2.1"
+futures = "0.3.33"
+h2 = "0.4.15"
+http = "1.5.0"
+http-body-util = "0.1.4"
+hyper = { version = "1.11.0", features = ["http1", "server"] }
+hyper-util = { version = "0.1.20", features = ["tokio"] }
+nix = { version = "0.31.3", default-features = false, features = ["process", "signal", "user"] }
+percent-encoding = "2.3.2"
+notify = "8.2.0"
+quote = "1.0.47"
+rand = "0.10.2"
+rcgen = "0.14.8"
+regex = "1.13.1"
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json", "stream"] }
+rmcp = { version = "3.1.1", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "reqwest"] }
+rustls = "0.23.43"
+schemars = "1.2.2"
+rustls-pemfile = "2.2.0"
+secrecy = { version = "0.10.3", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive", "rc"] }
+serde_json_canonicalizer = "0.3.2"
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+sha2 = "0.11.0"
+syn = { version = "3.0.3", features = ["full", "extra-traits", "visit"] }
+serde_yaml = { package = "yaml_serde", version = "0.10.4" }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "sqlite", "postgres"] }
+tempfile = "3.27.0"
+thiserror = "2.0.19"
+tiktoken-rs = "0.12.0"
+tikv-jemallocator = "0.7.0"
+tokio = { version = "1.53.1", features = ["macros", "rt"] }
+tokio-rustls = "0.26.4"
+tokio-tungstenite = "0.30.0"
+tokio-util = "0.7.19"
+url = "2.5.8"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+utoipa = "5.5.0"
+wiremock = "0.6.5"
+zeroize = "1.9.0"
+
+# Praxis core dependencies
+praxis-core = { version = "0.5.1", package = "praxis-proxy-core" }
+praxis-filter = { version = "0.5.1", package = "praxis-proxy-filter" }
+praxis-protocol = { version = "0.5.1", package = "praxis-proxy-protocol" }
+praxis-tls = { version = "0.5.1", package = "praxis-proxy-tls" }
+praxis = { version = "0.5.1", package = "praxis-proxy" }
+praxis-test-utils = { path = "tests/utils" }
+
+# Praxis AI workspace dependencies
+praxis-ai-proxy = { version = "0.2.0", path = "server" }
+praxis-ai-filters = { version = "0.2.0", path = "filters" }
+praxis-ai-apis = { version = "0.2.0", path = "apis" }
+
+# Pingora (temporary fork)
+pingora-core = { version = "0.8.2", package = "quixotic-plecostomus-core", features = ["rustls"] }
+pingora-http = { version = "0.8.2", package = "quixotic-plecostomus-http" }
+
+pingora-proxy = { version = "0.8.2", package = "quixotic-plecostomus-proxy", features = ["rustls"] }
+arc-swap = "1.9.2"
+metrics = "0.24.6"
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
+metrics-util = { version = "0.20.4", default-features = false, features = ["debugging"] }
+cargo_metadata = "0.23.1"
+
+[profile.release]
+codegen-units = 1
+lto = true
+overflow-checks = true
+panic = "abort"
+strip = true
+
+[profile.profiling]
+inherits = "release"
+debug = 2
+strip = false
+lto = false
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[workspace.lints.rust]
+dead_code = "deny"
+unsafe_code = "deny"
+missing_docs = "deny"
+unreachable_pub = "deny"
+unused_imports = "deny"
+unused_variables = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+macro_use_extern_crate = "deny"
+unused_extern_crates = "deny"
+elided_lifetimes_in_paths = "deny"
+single_use_lifetimes = "deny"
+unused_qualifications = "deny"
+unused_macro_rules = "deny"
+meta_variable_misuse = "deny"
+let_underscore_drop = "deny"
+keyword_idents_2024 = "deny"
+non_ascii_idents = "deny"
+noop_method_call = "deny"
+redundant_lifetimes = "deny"
+missing_debug_implementations = "allow"
+
+[workspace.lints.clippy]
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
+future_not_send = "deny"
+large_futures = "deny"
+let_underscore_future = "deny"
+let_underscore_must_use = "deny"
+assigning_clones = "deny"
+implicit_clone = "deny"
+inefficient_to_string = "deny"
+large_enum_variant = "deny"
+large_stack_frames = "deny"
+large_types_passed_by_value = "deny"
+needless_pass_by_value = "deny"
+rc_buffer = "deny"
+str_to_string = "deny"
+trivially_copy_pass_by_ref = "deny"
+vec_init_then_push = "deny"
+return_self_not_must_use = "deny"
+doc_markdown = "deny"
+missing_docs_in_private_items = "deny"
+empty_line_after_outer_attr = "allow"
+checked_conversions = "deny"
+cloned_instead_of_copied = "deny"
+explicit_into_iter_loop = "deny"
+explicit_iter_loop = "deny"
+flat_map_option = "deny"
+from_iter_instead_of_collect = "deny"
+manual_assert = "deny"
+manual_instant_elapsed = "deny"
+manual_let_else = "deny"
+manual_ok_or = "deny"
+manual_string_new = "deny"
+map_unwrap_or = "deny"
+redundant_closure_for_method_calls = "deny"
+ref_patterns = "deny"
+set_contains_or_insert = "deny"
+try_err = "deny"
+unnecessary_get_then_check = "deny"
+unnested_or_patterns = "deny"
+needless_borrow = "deny"
+if_not_else = "deny"
+match_bool = "deny"
+match_same_arms = "deny"
+mut_mut = "deny"
+needless_for_each = "deny"
+range_plus_one = "deny"
+redundant_else = "deny"
+semicolon_if_nothing_returned = "deny"
+uninlined_format_args = "deny"
+unreadable_literal = "deny"
+unseparated_literal_suffix = "deny"
+unused_self = "deny"
+enum_glob_use = "deny"
+wildcard_imports = "deny"
+string_add_assign = "deny"
+string_slice = "deny"
+too_many_lines = "deny"
+dbg_macro = "deny"
+print_stderr = "deny"
+print_stdout = "deny"
+cast_lossless = "deny"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+cast_precision_loss = "deny"
+ptr_as_ptr = "deny"
+missing_errors_doc = "deny"
+missing_panics_doc = "deny"
+unused_async = "deny"
+unnecessary_wraps = "deny"
+needless_pass_by_ref_mut = "deny"
+no_effect_underscore_binding = "deny"
+used_underscore_binding = "deny"
+option_option = "deny"
+ref_option_ref = "deny"
+default_trait_access = "deny"
+expl_impl_clone_on_copy = "deny"
+items_after_statements = "deny"
+macro_use_imports = "deny"
+multiple_inherent_impl = "deny"
+needless_continue = "deny"
+rest_pat_in_fully_bound_structs = "deny"
+same_functions_in_if_condition = "deny"
+same_name_method = "deny"
+stable_sort_primitive = "deny"
+string_add = "deny"
+string_lit_as_bytes = "deny"
+trait_duplication_in_bounds = "deny"
+type_repetition_in_bounds = "deny"
+verbose_bit_mask = "deny"
+zero_sized_map_values = "deny"
+fn_params_excessive_bools = "deny"
+struct_excessive_bools = "deny"
+cognitive_complexity = "deny"
+too_many_arguments = "deny"
+unwrap_used = "deny"
+missing_assert_message = "deny"
+infinite_loop = "deny"
+map_err_ignore = "deny"
+or_fun_call = "deny"
+clone_on_ref_ptr = "deny"
+debug_assert_with_mut_call = "deny"
+collection_is_never_read = "deny"
+rc_mutex = "deny"
+significant_drop_in_scrutinee = "deny"
+mutex_integer = "deny"
+mutex_atomic = "deny"
+zombie_processes = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+significant_drop_tightening = "warn"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+redundant_type_annotations = "deny"
+needless_raw_strings = "deny"
+needless_raw_string_hashes = "deny"
+inconsistent_struct_constructor = "deny"
+match_wildcard_for_single_variants = "deny"
+single_match_else = "deny"
+empty_drop = "deny"
+manual_clamp = "deny"
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+todo = "deny"
+unimplemented = "deny"
+unused_result_ok = "deny"
+exit = "deny"
+mem_forget = "deny"
+unused_trait_names = "deny"
+error_impl_error = "deny"
+empty_structs_with_brackets = "deny"
+tests_outside_test_module = "deny"
+unnecessary_safety_comment = "deny"
+renamed_function_params = "deny"
+if_then_some_else_none = "deny"
+format_push_string = "deny"
+deref_by_slicing = "deny"
+lossy_float_literal = "deny"
+semicolon_inside_block = "deny"
+disallowed_methods = "deny"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+invalid_codeblock_attributes = "deny"
+redundant_explicit_links = "deny"
+unescaped_backticks = "deny"
+bare_urls = "deny"
+invalid_html_tags = "deny"
+missing_crate_level_docs = "deny"
+private_doc_tests = "allow"

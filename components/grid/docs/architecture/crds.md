@@ -1,0 +1,687 @@
+# Custom Resource Definitions
+
+API group: `grid.praxis-proxy.io/v1alpha1`
+
+All CRDs are cluster-scoped.
+
+## GridNetwork
+
+The grid itself. Top-level tenancy scope. A single
+cluster can host multiple `GridNetworks` for
+multi-tenancy.
+
+```yaml
+apiVersion: grid.praxis-proxy.io/v1alpha1
+kind: GridNetwork
+metadata:
+  name: production
+spec:
+  gridId: ""                    # auto-generated on first join
+  seeds:
+    - "10.0.0.5:7946"
+  gatewayRefs:
+    - name: inference-gw
+      namespace: praxis-system
+      localSiteName: cluster-east   # optional; defaults to network name
+      consumerConfig:               # optional; opt-in consumer Praxis config generation
+        enabled: true
+        credentialMountBase: /run/secrets/grid-credentials
+        configMapName: praxis-consumer-config
+        tlsCertMountPath: /etc/praxis/tls
+        clusterEndpoints:           # endpoint topology for load_balancer
+          - cluster: site-a
+            address: "10.0.0.4:30080"
+            transport:
+              mode: mutual_tls         # mTLS with CA verification and client cert
+              sni: site-a.grid.internal
+          - cluster: api-provider
+            address: "mock-api.default.svc:8080"
+            transport:
+              mode: plaintext          # explicit insecure/dev-only — no TLS
+  region: us-east-1
+  zone: us-east-1a
+  swim:
+    probeInterval: 5s           # WAN probe interval
+    suspicionTimeout: 10s       # before declaring dead
+    gossipNodes: 3              # indirect probe fanout
+  tls:
+    caSecretRef:
+      name: grid-ca
+      namespace: praxis-system
+    siteSecretRef:
+      name: grid-site-cert
+      namespace: praxis-system
+    swimKeyRef:
+      name: swim-key
+      namespace: praxis-system
+```
+
+**Phases**: Pending → Initializing → Active → Degraded
+
+**Status fields**: `gridId`, `connectedSites`, `distributedProviderCount`,
+`observedGeneration`, `phase`, `consumerConfigStatus[]`
+
+`distributedProviderCount` reflects the number of remote `InferenceProvider`
+records received from peer sites via CRDT broadcast.  Local providers and records
+from other `GridNetwork`s are excluded from the count.
+
+`consumerConfigStatus[]` is populated for each gateway with
+`consumerConfig.enabled: true`, reporting the outcome of the most recent
+render/apply attempt.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `gatewayName` | string | Name of the gateway reference |
+| `namespace` | string | Namespace of the gateway and generated `ConfigMap` |
+| `configMapName` | string | Name of the generated `ConfigMap` |
+| `phase` | enum | `Rendered` \| `Error` \| `Disabled` |
+| `reason` | string | Machine-readable reason (`MissingClusterEndpoint`, `ConsumerConfigRenderFailed`, `ConsumerConfigApplyFailed`) — empty when `Rendered` |
+| `message` | string | Human-readable diagnostic; never contains token bytes |
+| `observedGeneration` | integer | `GridNetwork` generation when this entry was last updated |
+
+Example status output:
+
+```yaml
+status:
+  phase: Active
+  gridId: grid-abc123
+  connectedSites: 2
+  consumerConfigStatus:
+    - gatewayName: inference-gw
+      namespace: praxis-system
+      configMapName: praxis-consumer-config
+      phase: Rendered
+      reason: ""
+      message: "consumer config rendered and applied to praxis-system/praxis-consumer-config"
+      observedGeneration: 7
+    - gatewayName: fallback-gw
+      namespace: default
+      configMapName: op-e2e-consumer-config
+      phase: Error
+      reason: ConsumerConfigRenderFailed
+      message: "consumer config render: overlay local_site must not be blank"
+      observedGeneration: 7
+```
+
+### CRD-driven SWIM seeds
+
+`spec.seeds` is a list of socket addresses (`host:port`) used to bootstrap
+SWIM mesh formation.  Seeds are announced to the running SWIM runtime on every
+`GridNetwork` reconcile.  Re-announcing to an existing peer is idempotent — foca
+ignores redundant joins.
+
+**Runtime update behavior:**
+
+| Change | Effect |
+|---|---|
+| Seed added to `spec.seeds` | Announced to the SWIM runtime on the next reconcile (~300 s default); SWIM join initiated |
+| Seed removed from `spec.seeds` | No active disconnect; SWIM failure detection ages out the peer naturally |
+| `spec.seeds` unchanged | Re-announced on every reconcile; idempotent, no side effects |
+
+**Channel-full behavior:** If the SWIM announce channel is temporarily full
+(capacity 16 batches), the announce is silently retried on the next reconcile.
+Seeds are not guaranteed to be joined within one reconcile cycle under heavy
+broadcast load, but the retry is automatic.
+
+**Scope:** `spec.seeds` targets the SWIM site-membership layer.  The SWIM runtime
+is process-global — all `GridNetwork` resources in the operator process share the
+same SWIM node.  Seeds from any `GridNetwork` reach the shared SWIM membership
+table.  Provider CRDT state remains scoped per network.
+
+**Self-filtering:** The operator removes its own SWIM bind address from
+`spec.seeds` before announcing, preventing self-join loops.
+
+**`spec.tls.swimKeyRef`:** References a Kubernetes Secret containing the 32-byte
+AES-256-GCM key for SWIM transport authentication.  When configured, the
+`GridNetwork` controller reads the key from the Secret and configures the
+SWIM runtime to encrypt all outgoing UDP packets and reject incoming packets
+that fail authentication before it announces CRD seeds or publishes
+certificate/provider state for that reconcile.
+
+The Secret must contain a `"key"` field (or the field named by `swimKeyRef.key`)
+with exactly 32 bytes.  If the Secret is absent, unreadable, or has the wrong
+length, the reconcile fails before CRD seed announcement and state broadcast.
+The process-global SWIM runtime keeps any previously loaded key until restart;
+it does not switch to plaintext for that configured reconcile.
+
+For local development and testing, the `GRID_SWIM_ENCRYPT_KEY` environment
+variable (64-character hex) provides an alternative key injection path without
+requiring a Kubernetes Secret.  Because environment variables are visible to
+same-host process inspectors, this is not the production Secret delivery path.
+
+Routing eligibility remains gated separately by `GridSite.status.phase == Active`
+regardless of SWIM encryption configuration. Active status indicates control-plane
+eligibility only: sufficient trust information exists to include the site in routing
+overlays. Data-plane security readiness (mTLS handshake completion, client certificate
+validation, routing config loading) is verified separately at request time.
+
+### Stale candidate TTL
+
+`spec.staleCandidateTtlSeconds` controls when stale (fresh=false) remote
+candidates are evicted from the rendered overlay.
+
+| Value | Behaviour |
+|---|---|
+| Absent (default) | Stale candidates are retained indefinitely in the overlay. |
+| `0` | Rejected by the CRD schema (`minimum: 1`). |
+| `N >= 1` | Remote candidates with SWIM member age `>= N` seconds are omitted from the overlay. |
+
+Local and healthy remote candidates are never evicted.  CRDT storage records
+are not deleted by this mechanism.
+
+### GatewayRef.consumerConfig
+
+`spec.gatewayRefs[].consumerConfig` opts a gateway into operator-managed consumer
+Praxis `ConfigMap` generation.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Set to `true` to enable consumer config generation for this gateway. |
+| `credentialMountBase` | `/run/secrets/grid-credentials` | Base directory where credential Secrets are mounted inside the consumer pod. |
+| `configMapName` | `praxis-consumer-config` | Name of the generated `ConfigMap` in the gateway namespace. |
+| `clusterEndpoints[]` | `[]` | Endpoint topology for `load_balancer` clusters. Each entry maps a candidate cluster name to an address with explicit `transport` configuration. Missing transport fails closed. |
+| `clusterEndpoints[].transport.mode` | _(required)_ | `mutual_tls` (mTLS with CA/client cert/SNI/verify) or `plaintext` (no TLS, insecure/dev-only). |
+| `clusterEndpoints[].transport.sni` | _(required for `mutual_tls`)_ | TLS Server Name Indication; must match the provider certificate SAN. |
+| `tlsCertMountPath` | `/etc/praxis/tls` | Base path for mounted TLS files used when a `clusterEndpoints[]` entry uses `mutual_tls` transport. |
+| `listenerPort` | `8080` | HTTP port for the generated `listeners[0].address` (`0.0.0.0:{listenerPort}`). |
+
+When `enabled: true`, the `GridNetwork` controller renders a `praxis.yaml`-keyed
+`ConfigMap` in the gateway namespace on each reconcile.  The generated config is a
+complete, runnable Praxis config containing:
+
+- `listeners:` — one public listener at `0.0.0.0:{listenerPort}`
+- `filter_chains:` — the consumer chain with:
+  - `intelligent_route` candidates from the routing overlay (with `credential.secretRef` for
+    credential-bearing candidates)
+  - `credential_inject` entries (one per unique credential reference) using
+    `file:` sources — token bytes are never written to the `ConfigMap`
+  - `load_balancer` entries (one per unique candidate cluster). Every referenced
+    cluster must have a matching `clusterEndpoints[]` entry with endpoint address
+    and explicit `transport` configuration.  `transport.mode` is the security
+    switch — not `sni` presence.  Missing transport fails closed
+- `admin:` — admin listener at `127.0.0.1:9901`
+- `shutdown_timeout_secs: 5`
+
+The generated credential-injection config assumes the gateway is the egress
+component for the selected backend.  This is correct for direct API-provider and
+cloud-provider fallback routes.  For remote provider sites, provider credentials
+should be mounted only in the remote site or provider-side component that makes
+the final backend call.
+
+The `credential_inject` filter is a Praxis AI runtime dependency.  The Grid
+operator can render the config shape, but the deployed Praxis AI image must
+include that filter for the generated config to start successfully.
+
+When `enabled: false` or `consumerConfig` is absent, this gateway behaves as before
+— only the routing overlay `ConfigMap` is applied.
+
+## GridSite
+
+Represents another site in the grid. Created manually
+for seed peers or automatically by SWIM discovery.
+
+```yaml
+apiVersion: grid.praxis-proxy.io/v1alpha1
+kind: GridSite
+metadata:
+  name: cluster-b
+  labels:
+    grid.praxis-proxy.io/network: production
+spec:
+  gridNetworkRef: production
+  egress:
+    address: egress.cluster-b.example.com:8443
+    tls:
+      mode: Mutual
+      serverName: egress.cluster-b.example.com
+  trust:
+    canonicalFingerprints:
+      - "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  region: us-east-1
+  zone: us-east-1a
+  sovereigntyZone: us
+```
+
+**Phases**: Pending → Discovered → Connecting → Active → Unreachable → Left
+
+**Status fields**: `phase`, `reason`, `message`, `observedGeneration`,
+`publicCertPem`, `capabilities` (inference, agentTools, agentToAgent),
+`lastProbeTime`, `lastTransitionTime`
+
+### GridSite lifecycle
+
+SWIM discovery, authentication, and authorization are separate concerns:
+
+- SWIM discovery identifies a peer and records liveness.
+- Authentication proves the peer gateway identity, normally through mTLS
+  certificate validation.
+- Authorization decides whether that authenticated peer is allowed to
+  participate in the Grid or carry traffic for a given policy scope.
+
+A discovered SWIM peer is not automatically authorized for routing.
+
+| Phase | How entered | Transition driver |
+|---|---|---|
+| `Pending` | Resource created (manually or by auto-discovery) | Initial default |
+| `Discovered` | SWIM peer observed as Alive | `GridNetwork` controller writes on first observation |
+| `Connecting` | Gateway address known (`spec.egress.address` non-empty) | `GridSite` controller advances from Discovered; performs identity-aware probe |
+| `Active` | `TlsVerified` | `GridSite` controller promotes from Connecting only after identity-verified TLS succeeds |
+| `Unreachable` | Connectivity failure while Active | `GridSite` controller moves Active → Unreachable when the endpoint cannot be reached |
+| `Left` | Set on graceful site departure | Preserved by operator once set |
+
+**Reason codes** (in `status.reason`):
+
+| Reason | Phase | Meaning |
+|---|---|---|
+| `AwaitingDiscovery` | Pending | Site record exists; SWIM has not yet observed the peer as Alive |
+| `SWIMDiscovered` | Discovered | Peer observed as Alive in SWIM membership; gateway address propagating |
+| `GatewayAddressKnown` | Connecting | Gateway address received; advancing to Connecting |
+| `GatewayAddressMissing` | Discovered | No gateway address known; see `GRID_GATEWAY_ADDRESS` |
+| `EgressMissing` | Connecting or Unreachable | A previously probed site has no egress address |
+| `TlsVerified` | Active | TLS handshake succeeded; certificate chain, identity, and configured pin verified |
+| `IdentityVerificationRequired` | Connecting | TCP endpoint is reachable, but plaintext cannot establish the gateway identity |
+| `PlaintextUnreachable` | Connecting or Unreachable | TCP probe failed (explicit Plaintext mode) |
+| `ConnectTimeout` / `ConnectionFailed` | Connecting or Unreachable | TCP connection timed out or failed |
+| `HandshakeTimeout` / `TlsProtocolError` | Connecting | TLS handshake timed out or failed |
+| `UntrustedIssuer` | Connecting | Server certificate does not chain to the configured Grid trust root |
+| `IdentityMismatch` | Connecting | Server SAN does not match configured `serverName` |
+| `CertificateExpired` / `CertificateNotYetValid` | Connecting | Server certificate is outside its validity period |
+| `PinMismatch` | Connecting | Canonical fingerprint does not match a configured pin |
+| `AdvertisedCertMismatch` | Connecting | SWIM-advertised certificate does not match either configured rotation pin |
+| `TrustMaterialMissing` | Connecting | CA, client certificate, key, server name, or pin policy is absent |
+| `TrustMaterialInvalid` | Connecting | Trust material is malformed, oversized, or uses the deprecated fingerprint format |
+
+**GridSite phase transitions:**
+
+- Pending → Discovered: the `GridNetwork` controller writes `Discovered` when a remote SWIM
+  peer is first observed as Alive (requires `grid.praxis-proxy.io/auto-discover-sites: "true"`
+  label on the `GridNetwork`).
+- Discovered → Connecting: the `GridSite` controller advances automatically when
+  `spec.egress.address` is non-empty. For auto-discovered sites, the egress address comes from
+  the remote operator's `GRID_GATEWAY_ADDRESS` env var, propagated via SWIM state broadcast.
+  If the remote operator has not configured `GRID_GATEWAY_ADDRESS`, the egress address is empty
+  and the site stays Discovered with reason `GatewayAddressMissing`.
+- Connecting: the `GridSite` controller probes the egress gateway on each reconcile.  For
+  `Mutual` TLS mode, the probe performs a bounded TLS handshake verifying the CA chain,
+  `serverName` SAN, and required `canonicalFingerprints` pin. For explicit
+  `Plaintext` mode, it performs a bounded TCP connect for diagnostics but keeps
+  the site in `Connecting`; TCP reachability alone cannot make a site
+  routing-eligible. Active also requires mTLS client credentials
+  (`siteSecretRef` must be configured on the `GridNetwork`).
+- Active → Unreachable: the `GridSite` controller demotes Active to Unreachable when the probe
+  cannot connect. Identity or trust failures demote Active to Connecting, distinguishing a
+  reachable but unverified endpoint from an unreachable endpoint.
+
+**`spec.egress.address` source:** For auto-discovered sites, the egress address is sourced from
+the remote operator's `GRID_GATEWAY_ADDRESS` environment variable, propagated through the SWIM
+state broadcast.  If the remote operator has not configured `GRID_GATEWAY_ADDRESS`, the field
+is empty and the site stays Discovered.  For manually-applied `GridSite` resources, set
+`spec.egress.address` explicitly to the data-plane gateway endpoint.
+
+**`status.publicCertPem`:** The public site certificate PEM received from the remote site via
+SWIM state broadcast.  Before storage, the operator performs a structural check:
+private-key markers (`PRIVATE KEY`) cause the input to be discarded entirely and an error
+logged.  Non-certificate PEM triggers `TrustMaterialInvalid` status.  A valid `CERTIFICATE`
+header passes the structural check.
+
+This field contains only the public certificate — never a private key.  A non-empty
+`publicCertPem` means the remote site has shared its public identity material and the
+structural check passed.  It does **not** mean:
+
+- The certificate has been chain-verified against a trusted CA.
+- The peer is authenticated or authorized for routing.
+- The content has been parsed as X.509.
+
+Private keys, bearer tokens, provider credentials, and Kubernetes Secret contents must never
+be written to status.
+
+**`spec.egress.tls` fields:**
+
+| Field | Meaning |
+|---|---|
+| `mode` | `Mutual` (default) — TLS handshake with CA verification and client auth; `Plaintext` — TCP-only diagnostics that never become routing-eligible |
+| `serverName` | Expected DNS identity for TLS SNI and SAN verification; required for `Mutual`, must be absent for `Plaintext` |
+
+**`spec.trust` fields:**
+
+| Field | Meaning |
+|---|---|
+| `canonicalFingerprints` | Required DER-certificate SHA-256 pins (`hex(sha256(der_bytes))`), one or two entries for bounded rotation overlap |
+| `certFingerprint` | **Deprecated.** Legacy PEM-based fingerprint; rejected at runtime with `TrustMaterialInvalid`; migrate to `canonicalFingerprints` |
+
+**Routing eligibility:** `GridSite.status.phase == Active` is the control-plane eligibility
+gate for remote CRDT provider records. Active means the control plane has
+verified the remote site's identity through TLS, which is sufficient to include
+the site's providers in routing overlays for consideration.
+
+Provider records from a peer whose `GridSite` is in `Discovered`, `Connecting`, `Pending`,
+`Unreachable`, or `Left` are excluded from the routing overlay. Records from a peer with
+no matching `GridSite` are also excluded (fail-closed).
+
+GridSite Active is a control-plane eligibility signal. It means Grid has enough
+site/trust information to consider the site for overlay generation. It does not
+prove that a Praxis gateway has loaded the latest routing config or authorized
+provider-side traffic. Data-plane readiness is verified separately at request
+time by provider gateway filters.
+
+See [Routing eligibility](routing.md#routing-eligibility) for the full gating rule.
+
+Example status — Mutual TLS verified:
+
+```yaml
+status:
+  phase: Active
+  reason: TlsVerified
+  message: "TLS handshake succeeded; certificate chain, identity, and pin verified"
+  observedGeneration: 5
+  lastProbeTime: "2026-07-30T12:00:00Z"
+  lastTransitionTime: "2026-07-30T11:55:00Z"
+```
+
+Example status — trust material missing:
+
+```yaml
+status:
+  phase: Connecting
+  reason: TrustMaterialMissing
+  message: "required trust material not available"
+  observedGeneration: 3
+```
+
+Example status — gateway address not configured on remote operator:
+
+```yaml
+status:
+  phase: Discovered
+  reason: GatewayAddressMissing
+  message: "gateway address not yet available; cannot advance to Connecting"
+  observedGeneration: 2
+```
+
+### Status conditions (acceptance criterion open)
+
+The current `GridSite` status uses a flat
+`phase`/`reason`/`message` model rather than a
+Kubernetes-style `conditions[]` array.
+
+Issue #11's acceptance criteria include a conditions-based
+status contract.  That criterion is **not yet resolved**:
+it requires either (a) implementing a `conditions[]` array
+or (b) formally amending the issue to accept the
+`phase`/`reason`/`message` model as the replacement.
+Neither has happened at the time of writing.
+
+The flat model is the current contract:
+
+- `phase` provides the primary lifecycle state;
+  `reason` encodes the machine-readable probe outcome;
+  `message` gives a bounded human-readable explanation.
+- Richer conditions (e.g. `Reachable`, `IdentityVerified`,
+  `CertificatePinned`) may be added when multi-signal
+  readiness is needed (see `docs/architecture/overview.md`,
+  Trust and Readiness section).
+
+Tools and automation **must not** depend on a
+`conditions[]` field existing.  Match on `phase` for
+coarse state and on `reason` for specific probe outcomes.
+
+## InferenceProvider
+
+Represents an inference backend available over the
+grid.
+
+```yaml
+apiVersion: grid.praxis-proxy.io/v1alpha1
+kind: InferenceProvider
+metadata:
+  name: anthropic-api
+spec:
+  gridNetworkRef: production
+  providerKind: anthropic       # open_ai | anthropic | bedrock | vertex | self_hosted
+  backendKind: api_provider     # local | remote | cloud_managed | api_provider
+  endpoint: https://api.anthropic.com
+  models:
+    - name: claude-sonnet-4
+      contextWindow: 200000
+      capabilities: [tool_calling, vision, streaming]
+  cost:
+    perMillionInputTokens: 3.0
+    perMillionOutputTokens: 15.0
+  auth:
+    strategy: bearer_token      # current native path; see Auth doc
+    secretRef:
+      name: anthropic-token
+      namespace: praxis-system
+      key: token
+  accessPolicy:
+    siteSelector:
+      matchLabels: {}           # empty = all sites
+  siteSelector:
+    matchLabels: {}
+  healthCheck:
+    interval: 30s
+    path: /v1/messages
+  metricsConfig:
+    path: /metrics
+    timeout: 2s
+    signalNames:
+      queueDepth: provider_queue_depth_normalized
+      kvCacheUtilization: provider_kv_cache_utilization
+      latencyP99Ms: provider_latency_p99_ms
+      prefixCacheHitRatio: provider_prefix_cache_hit_ratio
+      errorRate: provider_error_rate
+      healthy: provider_healthy
+    tls:
+      caSecretRef:
+        name: metrics-ca
+        namespace: grid-system
+```
+
+**Phases**: Pending → Available → Degraded → Unavailable
+
+### Backend kind
+
+`spec.backendKind` describes the provider's placement and policy category:
+
+| Value | Meaning |
+|-------|---------|
+| `local` | Self-hosted capacity in the local site. |
+| `remote` | Self-hosted capacity in another Grid site. |
+| `cloud_managed` | Managed cloud capacity controlled by the operator's cloud account. |
+| `api_provider` | External API/SaaS provider used as fallback or explicit API route. |
+
+The value influences scoring and routing policy. It does not require a specific
+transport implementation; for example, a `cloud_managed` backend can still be
+fronted by Praxis.
+
+### Credential projection
+
+`spec.auth.secretRef` points to a Kubernetes Secret that contains provider
+credential bytes.  For the current native `bearer_token` path:
+
+1. The operator validates that the Secret exists and contains the referenced key.
+2. The routing overlay candidate receives only:
+
+   ```json
+   {
+     "credential": {
+       "strategy": "bearer_token",
+       "secretRef": {
+         "name": "anthropic-token",
+         "namespace": "praxis-system",
+         "key": "token"
+       }
+     }
+   }
+   ```
+
+3. The consumer Praxis config uses `credential_inject` with a `file:` source
+   pointing at a mounted Secret file.
+
+Token bytes do not appear in the overlay `ConfigMap`, `intelligent_route` candidates,
+filter metadata, or the consumer Praxis `ConfigMap`.
+
+### Metrics configuration
+
+`spec.metricsConfig` configures the operator-side Prometheus scrape used during
+`GridNetwork` reconciliation. When present, the operator scrapes
+`{spec.endpoint}{metricsConfig.path}`, parses the configured signal names, and
+feeds the resulting `BackendMetrics` into overlay scoring.
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `path` | `/metrics` | HTTP path, relative to `spec.endpoint`. |
+| `timeout` | `2s` | Scrape timeout. `s` and `ms` suffixes are recognized. |
+| `signalNames` | all unset | Mapping from scoring signals to Prometheus metric names. |
+| `staleMetricsSeconds` | absent | Grace period (seconds) for using a cached sample when the current scrape fails.  When absent, scrape failures immediately produce neutral scoring.  Minimum: `1`. |
+| `tls` | absent | TLS configuration for metrics scraping.  See [TLS and mTLS](#tls-and-mtls). |
+
+Providers without `metricsConfig`, providers with failed scrapes (outside any
+configured grace period), and signals without configured metric names use neutral
+metric scores.  See [Stale metrics grace period](routing.md#stale-metrics-grace-period)
+in the routing architecture for the full semantics.
+
+#### Signal names
+
+| Field | Expected value |
+|-------|----------------|
+| `queueDepth` | Normalized queue depth from `0.0` to `1.0`. |
+| `kvCacheUtilization` | KV-cache utilization from `0.0` to `1.0`. |
+| `latencyP99Ms` | P99 request latency in milliseconds. |
+| `prefixCacheHitRatio` | Prefix-cache hit ratio from `0.0` to `1.0`. |
+| `errorRate` | Error rate from `0.0` to `1.0`. |
+| `healthy` | Health gauge interpreted by the metrics parser. |
+
+#### TLS and mTLS
+
+`metricsConfig.tls` enables Secret-backed TLS (and optionally mutual TLS)
+for metrics scraping.  When configured, the operator resolves PEM material
+from Kubernetes Secrets at reconcile time and uses it for all scrape
+requests to this provider's metrics endpoint.
+
+| Field | Required | Meaning |
+|-------|----------|---------|
+| `tls.caSecretRef` | yes | Secret containing the CA certificate for server verification. Default key: `ca.crt`. |
+| `tls.clientCertificateSecretRef` | no | Secret containing client certificate and private key for mTLS. |
+| `tls.clientCertificateSecretRef.certificateKey` | no | Key within `Secret.data` for the certificate PEM. Default: `tls.crt`. |
+| `tls.clientCertificateSecretRef.privateKeyKey` | no | Key within `Secret.data` for the private key PEM. Default: `tls.key`. |
+
+`caSecretRef` follows the same [`SecretRef`](#secretref) schema used by
+`spec.auth.secretRef`.  `clientCertificateSecretRef` adds explicit
+`certificateKey` and `privateKeyKey` fields with serde defaults.
+
+**Failure behavior**: when TLS material cannot be resolved or parsed, the
+provider phase is downgraded from `Available` to `Degraded` with a
+machine-readable `status.reason`:
+
+| Reason | Category | Meaning |
+|--------|----------|---------|
+| `MetricsTlsSecretMissing` | reconcile-time | A referenced Secret does not exist. |
+| `MetricsTlsKeyMissing` | reconcile-time | The expected key is absent from `Secret.data`. |
+| `MetricsTlsMaterialInvalid` | reconcile-time | PEM material could not be parsed. |
+| `MetricsTlsIdentityMismatch` | reconcile-time | Client certificate and private key do not match. |
+| `MetricsTlsHandshakeFailed` | scrape-time | TLS handshake failed (wrong CA, expired cert, hostname mismatch). |
+| `MetricsUnauthorized` | scrape-time | Metrics endpoint returned HTTP 401 or 403. |
+| `MetricsScrapeTimeout` | scrape-time | Metrics scrape timed out before receiving a response. |
+
+Scrape-time failures are logged with the classified reason.  The provider
+falls back to the stale metrics cache (if `staleMetricsSeconds` is set) or
+is excluded from routing with `UNOBSERVABLE_METRICS` (`healthy: false`).
+
+There is no `insecureSkipVerify` option.
+
+Example (one-way TLS):
+
+```yaml
+metricsConfig:
+  path: /metrics
+  timeout: 2s
+  signalNames:
+    queueDepth: vllm:num_requests_waiting
+  tls:
+    caSecretRef:
+      name: metrics-ca
+      namespace: grid-system
+```
+
+Example (mTLS):
+
+```yaml
+metricsConfig:
+  path: /metrics
+  timeout: 2s
+  signalNames:
+    queueDepth: vllm:num_requests_waiting
+  tls:
+    caSecretRef:
+      name: metrics-ca
+      namespace: grid-system
+    clientCertificateSecretRef:
+      name: metrics-client-cert
+      namespace: grid-system
+      certificateKey: tls.crt
+      privateKeyKey: tls.key
+```
+
+#### Queue depth normalization
+
+Grid does not normalize raw queue counts. Exporters should publish
+`queueDepth` as a normalized `0.0`–`1.0` gauge before the operator scrapes it.
+
+## AgentToolProvider
+
+Represents MCP tool servers available over the grid.
+
+```yaml
+apiVersion: grid.praxis-proxy.io/v1alpha1
+kind: AgentToolProvider
+metadata:
+  name: db-tools
+spec:
+  gridNetworkRef: production
+  protocol: mcp
+  endpoint: http://db-tools.tools:8080
+  tools:
+    - name: database-query
+      description: "Query the database"
+  auth:
+    strategy: bearer_token
+    secretRef:
+      name: tool-token
+      namespace: praxis-system
+  accessPolicy:
+    siteSelector:
+      matchLabels:
+        grid.praxis-proxy.io/site: cluster-a
+```
+
+**Phases**: Pending → Available → Degraded → Unavailable
+
+**Status fields**: `discoveredTools` (auto-populated
+from MCP `tools/list`), `matchingSites`
+
+## AgentToAgentProvider
+
+Represents A2A agents available over the grid.
+
+```yaml
+apiVersion: grid.praxis-proxy.io/v1alpha1
+kind: AgentToAgentProvider
+metadata:
+  name: claims-agent
+spec:
+  gridNetworkRef: production
+  protocol: a2a
+  endpoint: http://claims-agent.agents:8080
+  agentCard:
+    skills: [claims-processing, document-review]
+    modalities: [text]
+  auth:
+    strategy: mtls_only
+  accessPolicy:
+    siteSelector:
+      matchLabels:
+        grid.praxis-proxy.io/site: cluster-a
+```
+
+**Phases**: Pending → Available → Degraded → Unavailable

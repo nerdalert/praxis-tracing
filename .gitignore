@@ -1,0 +1,48 @@
+# Local runtime state
+.ui.pid
+.forge.resolved.yaml
+.env
+.env.*
+
+# Build and dependency output
+target/
+**/target/
+node_modules/
+**/node_modules/
+test-results/
+**/test-results/
+
+# Runtime evidence and generated reports
+evidence/
+**/evidence/
+*.log
+*.pid
+
+# Local IDE and OS files
+.DS_Store
+.idea/
+.vscode/
+
+# Source snapshots may contain nested repository metadata; the public repo is
+# intentionally a clean snapshot rather than a collection of submodules.
+**/.git/
+**/.forge/runtime/
+**/.forge/evidence/
+
+# Original working copies; the publishable snapshots live under components/.
+/ai/
+/grid/
+/demos/
+/evidence/
+/glb-tracing-demo/
+/grid-glb-tracing-demo/
+/routing-observability-ui.checkpoint-*/
+components/ai/.claude/
+components/ai/.github/prompts/
+components/grid/.claude/
+
+# Local validation reports are intentionally kept out of the public source
+# repository.
+GLB-TRACING-*.md
+OVERNIGHT-REPORT.md
+public-demos/**/VALIDATION-REPORT.md

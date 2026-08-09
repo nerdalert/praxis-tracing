@@ -1,0 +1,526 @@
+apiVersion: forge.praxis.dev/v1alpha1
+kind: Environment
+
+metadata:
+  name: grid-glb-demo
+
+spec:
+  runtime:
+    provider: docker
+    clusterPrefix: grid-glb
+
+  network:
+    crossCluster: true
+    dnsZone: grid-glb.test
+
+  clusters:
+    - name: east-provider
+      stacks: [metallb, grid-operator, east-provider-operator, east-provider-site, vcr-backend]
+      properties:
+        region: east
+        role: provider
+        gatewayImage: "praxis-ai:glb-demo"
+        operatorImage: "grid-operator:glb-demo"
+        vcrImage: "ghcr.io/neuralmagic/vllm-vcr:vllm0.23"
+        imagePullPolicy: IfNotPresent
+        gatewayImageRepo: "praxis-ai"
+        gatewayImageTag: "glb-demo"
+        operatorImageRepo: "grid-operator"
+        operatorImageTag: "glb-demo"
+
+    - name: west-provider
+      stacks: [metallb, grid-operator, west-provider-operator, west-provider-site, vcr-backend]
+      properties:
+        region: west
+        role: provider
+        gatewayImage: "praxis-ai:glb-demo"
+        operatorImage: "grid-operator:glb-demo"
+        vcrImage: "ghcr.io/neuralmagic/vllm-vcr:vllm0.23"
+        imagePullPolicy: IfNotPresent
+        gatewayImageRepo: "praxis-ai"
+        gatewayImageTag: "glb-demo"
+        operatorImageRepo: "grid-operator"
+        operatorImageTag: "glb-demo"
+
+    - name: east-edge
+      stacks: [metallb, grid-operator, east-edge-operator, east-edge-site, edge-gateway]
+      properties:
+        region: east
+        role: edge
+        gatewayImage: "praxis-ai:glb-demo"
+        operatorImage: "grid-operator:glb-demo"
+        vcrImage: "ghcr.io/neuralmagic/vllm-vcr:vllm0.23"
+        imagePullPolicy: IfNotPresent
+        gatewayImageRepo: "praxis-ai"
+        gatewayImageTag: "glb-demo"
+        operatorImageRepo: "grid-operator"
+        operatorImageTag: "glb-demo"
+
+    - name: west-edge
+      stacks: [metallb, grid-operator, west-edge-operator, west-edge-site, edge-gateway]
+      properties:
+        region: west
+        role: edge
+        gatewayImage: "praxis-ai:glb-demo"
+        operatorImage: "grid-operator:glb-demo"
+        vcrImage: "ghcr.io/neuralmagic/vllm-vcr:vllm0.23"
+        imagePullPolicy: IfNotPresent
+        gatewayImageRepo: "praxis-ai"
+        gatewayImageTag: "glb-demo"
+        operatorImageRepo: "grid-operator"
+        operatorImageTag: "glb-demo"
+
+    - name: gtm-emulator
+      stacks: [metallb, gtm-emulator]
+      properties:
+        region: global
+        role: gtm-emulator
+        gatewayImage: "praxis-ai:glb-demo"
+        operatorImage: "grid-operator:glb-demo"
+        vcrImage: "ghcr.io/neuralmagic/vllm-vcr:vllm0.23"
+        imagePullPolicy: IfNotPresent
+        gatewayImageRepo: "praxis-ai"
+        gatewayImageTag: "glb-demo"
+        operatorImageRepo: "grid-operator"
+        operatorImageTag: "glb-demo"
+
+  stacks:
+    metallb:
+      description: MetalLB load balancer with auto-configured address pool
+      steps:
+        - type: url
+          url: https://raw.githubusercontent.com/metallb/metallb/v0.14.9/config/manifests/metallb-native.yaml
+          sha256: 951065e85692aa106f1bb5d5a487d9306154923a794ab1d82122881cbaf588e4
+        - type: wait
+          resource: deployment/controller
+          namespace: metallb-system
+          condition: available
+          timeout: "120s"
+        - type: metallb-auto-pool
+          name: forge-pool
+
+    grid-operator:
+      description: Grid CRDs, operator, and SWIM LoadBalancer via Helm
+      steps:
+        - type: helm
+          release: grid-operator
+          chart: charts/grid-operator
+          version: "0.1.0"
+          namespace: grid-system
+          values:
+            image:
+              repository: "{{ cluster.properties.operatorImageRepo }}"
+              tag: "{{ cluster.properties.operatorImageTag }}"
+              pullPolicy: "{{ cluster.properties.imagePullPolicy }}"
+            swim:
+              service:
+                enabled: true
+                type: "LoadBalancer"
+        - type: wait
+          resource: deployment/grid-operator
+          namespace: grid-system
+          condition: available
+          timeout: "120s"
+        - type: capture
+          resource: svc/grid-operator-swim
+          namespace: grid-system
+          jsonpath: "{.status.loadBalancer.ingress[0].ip}"
+          key: swim-lb-ip
+          timeout: "60s"
+          interval: "2s"
+
+    east-provider-operator:
+      description: East provider Grid operator identity and SWIM peers
+      steps:
+        - type: helm
+          release: grid-operator
+          chart: charts/grid-operator
+          version: "0.1.0"
+          namespace: grid-system
+          values:
+            image:
+              repository: "{{ cluster.properties.operatorImageRepo }}"
+              tag: "{{ cluster.properties.operatorImageTag }}"
+              pullPolicy: "{{ cluster.properties.imagePullPolicy }}"
+            swim:
+              advertiseAddress: "{{ captures.east-provider.swim-lb-ip }}:7946"
+              siteName: "east-provider"
+              seeds: "{{ captures.east-edge.swim-lb-ip }}:7946,{{ captures.west-edge.swim-lb-ip }}:7946,{{ captures.west-provider.swim-lb-ip }}:7946"
+              service:
+                enabled: true
+                type: "LoadBalancer"
+            gateway:
+              port: "8443"
+        - type: wait
+          resource: deployment/grid-operator
+          namespace: grid-system
+          condition: available
+          timeout: "120s"
+
+    west-provider-operator:
+      description: West provider Grid operator identity and SWIM peers
+      steps:
+        - type: helm
+          release: grid-operator
+          chart: charts/grid-operator
+          version: "0.1.0"
+          namespace: grid-system
+          values:
+            image:
+              repository: "{{ cluster.properties.operatorImageRepo }}"
+              tag: "{{ cluster.properties.operatorImageTag }}"
+              pullPolicy: "{{ cluster.properties.imagePullPolicy }}"
+            swim:
+              advertiseAddress: "{{ captures.west-provider.swim-lb-ip }}:7946"
+              siteName: "west-provider"
+              seeds: "{{ captures.east-edge.swim-lb-ip }}:7946,{{ captures.east-provider.swim-lb-ip }}:7946,{{ captures.west-edge.swim-lb-ip }}:7946"
+              service:
+                enabled: true
+                type: "LoadBalancer"
+            gateway:
+              port: "8443"
+        - type: wait
+          resource: deployment/grid-operator
+          namespace: grid-system
+          condition: available
+          timeout: "120s"
+
+    east-edge-operator:
+      description: East edge Grid operator identity and SWIM peers
+      steps:
+        - type: helm
+          release: grid-operator
+          chart: charts/grid-operator
+          version: "0.1.0"
+          namespace: grid-system
+          values:
+            image:
+              repository: "{{ cluster.properties.operatorImageRepo }}"
+              tag: "{{ cluster.properties.operatorImageTag }}"
+              pullPolicy: "{{ cluster.properties.imagePullPolicy }}"
+            swim:
+              advertiseAddress: "{{ captures.east-edge.swim-lb-ip }}:7946"
+              siteName: "east-edge"
+              seeds: "{{ captures.east-provider.swim-lb-ip }}:7946,{{ captures.west-edge.swim-lb-ip }}:7946,{{ captures.west-provider.swim-lb-ip }}:7946"
+              service:
+                enabled: true
+                type: "LoadBalancer"
+            gateway:
+              serviceName: "edge-gateway"
+              port: "8080"
+        - type: wait
+          resource: deployment/grid-operator
+          namespace: grid-system
+          condition: available
+          timeout: "120s"
+
+    west-edge-operator:
+      description: West edge Grid operator identity and SWIM peers
+      steps:
+        - type: helm
+          release: grid-operator
+          chart: charts/grid-operator
+          version: "0.1.0"
+          namespace: grid-system
+          values:
+            image:
+              repository: "{{ cluster.properties.operatorImageRepo }}"
+              tag: "{{ cluster.properties.operatorImageTag }}"
+              pullPolicy: "{{ cluster.properties.imagePullPolicy }}"
+            swim:
+              advertiseAddress: "{{ captures.west-edge.swim-lb-ip }}:7946"
+              siteName: "west-edge"
+              seeds: "{{ captures.east-edge.swim-lb-ip }}:7946,{{ captures.east-provider.swim-lb-ip }}:7946,{{ captures.west-provider.swim-lb-ip }}:7946"
+              service:
+                enabled: true
+                type: "LoadBalancer"
+            gateway:
+              serviceName: "edge-gateway"
+              port: "8080"
+        - type: wait
+          resource: deployment/grid-operator
+          namespace: grid-system
+          condition: available
+          timeout: "120s"
+
+    east-provider-site:
+      description: East provider site and inference capacity
+      steps:
+        - type: manifest
+          path: resources/site-east-provider.yaml
+        - type: manifest
+          path: resources/inference-east-provider.yaml
+        - type: manifest
+          path: resources/inference-east-provider-secondary.yaml
+        - type: template-manifest
+          path: resources/provider-workload-east-secondary.yaml
+        - type: wait
+          resource: deployment/vcr-inference-secondary
+          namespace: grid-system
+          condition: available
+          timeout: "120s"
+        - type: template-manifest
+          path: resources/gridnetwork-east-provider.yaml
+
+    west-provider-site:
+      description: West provider site and inference capacity
+      steps:
+        - type: manifest
+          path: resources/site-west-provider.yaml
+        - type: manifest
+          path: resources/inference-west-provider.yaml
+        - type: template-manifest
+          path: resources/gridnetwork-west-provider.yaml
+
+    east-edge-site:
+      description: East edge site and operator-rendered routing overlay
+      steps:
+        - type: manifest
+          path: resources/site-east-edge.yaml
+        # Provider GridSites give the operator region/zone data for
+        # CRDT-discovered providers so locality scoring resolves correctly.
+        - type: manifest
+          path: resources/site-east-provider.yaml
+        - type: manifest
+          path: resources/site-west-provider.yaml
+        - type: manifest
+          path: policies/provider-access.yaml
+        - type: template-manifest
+          path: resources/gridnetwork-east-edge.yaml
+
+    west-edge-site:
+      description: West edge site and operator-rendered routing overlay
+      steps:
+        - type: manifest
+          path: resources/site-west-edge.yaml
+        - type: manifest
+          path: resources/site-east-provider.yaml
+        - type: manifest
+          path: resources/site-west-provider.yaml
+        - type: manifest
+          path: policies/provider-access.yaml
+        - type: template-manifest
+          path: resources/gridnetwork-west-edge.yaml
+
+    vcr-backend:
+      description: vllm-vcr inference backend behind an mTLS Praxis provider gateway
+      steps:
+        - type: template-manifest
+          path: resources/provider-workloads.yaml
+        - type: exec
+          command:
+            - bash
+            - -c
+            - >-
+              kubectl --context kind-grid-glb-{{ cluster.name }} -n grid-system
+              create configmap provider-gateway-config
+              --from-file=praxis.yaml=.forge/runtime/glb-tls/provider-configs/{{ cluster.name }}/praxis.yaml
+              --dry-run=client -o yaml |
+              kubectl --context kind-grid-glb-{{ cluster.name }} apply -f -
+        - type: helm
+          release: provider-gateway
+          chart: charts/praxis-gateway
+          version: "0.1.0"
+          namespace: grid-system
+          values:
+            nameOverride: "provider-gateway"
+            image:
+              repository: "{{ cluster.properties.gatewayImageRepo }}"
+              tag: "{{ cluster.properties.gatewayImageTag }}"
+              pullPolicy: "{{ cluster.properties.imagePullPolicy }}"
+            podSecurityContext:
+              runAsUser: 100
+              runAsGroup: 101
+            resources:
+              requests:
+                cpu: 100m
+                memory: 64Mi
+              limits:
+                cpu: 500m
+                memory: 256Mi
+            config:
+              existingConfigMap: "provider-gateway-config"
+            port:
+              containerPort: 8443
+              name: "https-mtls"
+            service:
+              type: "LoadBalancer"
+              port: 8443
+            health:
+              readiness:
+                tcpSocket:
+                  port: "https-mtls"
+                initialDelaySeconds: 3
+                periodSeconds: 5
+              liveness:
+                tcpSocket:
+                  port: "https-mtls"
+                initialDelaySeconds: 5
+                periodSeconds: 10
+            tls:
+              enabled: true
+              existingSecret: "provider-gateway-tls"
+            credentials:
+              - name: "vcr-inference-credential"
+                mountPath: "/etc/praxis/credentials/vcr-inference"
+              - name: "vcr-inference-secondary-credential"
+                mountPath: "/etc/praxis/credentials/vcr-inference-secondary"
+                optional: true
+            podLabels:
+              grid.praxis-proxy.io/backend-access: "provider-gateway"
+              grid.praxis-proxy.io/provider-site: "{{ cluster.name }}"
+        - type: manifest
+          path: resources/backend-network-policy.yaml
+        - type: wait
+          resource: deployment/vcr-inference
+          namespace: grid-system
+          condition: available
+          timeout: "120s"
+        - type: wait
+          resource: deployment/provider-gateway
+          namespace: grid-system
+          condition: available
+          timeout: "120s"
+        - type: capture
+          resource: svc/provider-gateway
+          namespace: grid-system
+          jsonpath: "{.status.loadBalancer.ingress[0].ip}"
+          key: provider-gateway-ip
+          timeout: "60s"
+          interval: "2s"
+
+    edge-gateway:
+      description: Kubernetes-native Praxis edge with a projected Grid overlay
+      steps:
+        - type: template-file
+          source: configs/edge/praxis.yaml
+          target: .forge/runtime/{{ cluster.name }}/edge/praxis.yaml
+        - type: exec
+          command:
+            - bash
+            - -c
+            - >-
+              kubectl --context kind-grid-glb-{{ cluster.name }} -n grid-system
+              create configmap edge-gateway-config
+              --from-file=praxis.yaml=.forge/runtime/{{ cluster.name }}/edge/praxis.yaml
+              --dry-run=client -o yaml |
+              kubectl --context kind-grid-glb-{{ cluster.name }} apply -f -
+        - type: helm
+          release: edge-gateway
+          chart: charts/praxis-gateway
+          version: "0.1.0"
+          namespace: grid-system
+          values:
+            nameOverride: "edge-gateway"
+            image:
+              repository: "{{ cluster.properties.gatewayImageRepo }}"
+              tag: "{{ cluster.properties.gatewayImageTag }}"
+              pullPolicy: "{{ cluster.properties.imagePullPolicy }}"
+            podSecurityContext:
+              runAsUser: 100
+              runAsGroup: 101
+            resources:
+              requests:
+                cpu: 100m
+                memory: 64Mi
+              limits:
+                cpu: 500m
+                memory: 256Mi
+            config:
+              existingConfigMap: "edge-gateway-config"
+            service:
+              type: "LoadBalancer"
+            overlay:
+              enabled: true
+              existingConfigMap: "grid-overlay-glb-demo-edge-gateway"
+            tls:
+              enabled: true
+              existingSecret: "edge-gateway-tls"
+            podLabels:
+              grid.praxis-proxy.io/edge-site: "{{ cluster.name }}"
+        - type: wait
+          resource: deployment/edge-gateway
+          namespace: grid-system
+          condition: available
+          timeout: "120s"
+        - type: capture
+          resource: svc/edge-gateway
+          namespace: grid-system
+          jsonpath: "{.status.loadBalancer.ingress[0].ip}"
+          key: edge-gateway-ip
+          timeout: "60s"
+          interval: "2s"
+
+    gtm-emulator:
+      description: Local Praxis emulator for a managed GTM or global load-balancing service
+      steps:
+        - type: manifest
+          path: resources/grid-system-namespace.yaml
+        - type: template-file
+          source: configs/gtm-emulator/praxis.yaml
+          target: .forge/runtime/gtm-emulator/praxis.yaml
+        - type: exec
+          command:
+            - bash
+            - -c
+            - >-
+              kubectl --context kind-grid-glb-gtm-emulator -n grid-system
+              create configmap gtm-emulator-config
+              --from-file=praxis.yaml=.forge/runtime/gtm-emulator/praxis.yaml
+              --dry-run=client -o yaml |
+              kubectl --context kind-grid-glb-gtm-emulator apply -f -
+        - type: helm
+          release: gtm-emulator
+          chart: charts/praxis-gateway
+          version: "0.1.0"
+          namespace: grid-system
+          values:
+            nameOverride: "gtm-emulator"
+            image:
+              repository: "{{ cluster.properties.gatewayImageRepo }}"
+              tag: "{{ cluster.properties.gatewayImageTag }}"
+              pullPolicy: "{{ cluster.properties.imagePullPolicy }}"
+            podSecurityContext:
+              runAsUser: 100
+              runAsGroup: 101
+            resources:
+              requests:
+                cpu: 100m
+                memory: 64Mi
+              limits:
+                cpu: 500m
+                memory: 256Mi
+            config:
+              existingConfigMap: "gtm-emulator-config"
+            health:
+              readiness:
+                tcpSocket:
+                  port: "https"
+                initialDelaySeconds: 3
+                periodSeconds: 5
+              liveness:
+                tcpSocket:
+                  port: "https"
+                initialDelaySeconds: 5
+                periodSeconds: 10
+            port:
+              containerPort: 8443
+              name: "https"
+            service:
+              type: "LoadBalancer"
+              port: 8443
+            tls:
+              enabled: true
+              existingSecret: "gtm-emulator-tls"
+        - type: wait
+          resource: deployment/gtm-emulator
+          namespace: grid-system
+          condition: available
+          timeout: "120s"
+        - type: capture
+          resource: svc/gtm-emulator
+          namespace: grid-system
+          jsonpath: "{.status.loadBalancer.ingress[0].ip}"
+          key: gtm-emulator-ip
+          timeout: "60s"
+          interval: "2s"

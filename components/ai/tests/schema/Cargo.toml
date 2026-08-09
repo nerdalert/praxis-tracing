@@ -1,0 +1,21 @@
+[package]
+name = "praxis-tests-schema"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+readme = "../../README.md"
+publish = false
+
+[features]
+praxis-main = ["praxis-test-utils/praxis-main"]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+praxis-core = { workspace = true }
+praxis-filter = { workspace = true }
+praxis-test-utils = { workspace = true }
+serde_yaml = { workspace = true }
+tempfile = { workspace = true }

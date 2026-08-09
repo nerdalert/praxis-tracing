@@ -1,0 +1,2 @@
+This checked-in transcript is a placeholder for the VCR-backed GLB demo.
+Run `./run.sh --quick --teardown` to generate fresh transcript and evidence.

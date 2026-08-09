@@ -1,0 +1,496 @@
+apiVersion: forge.praxis.dev/v1alpha1
+kind: Environment
+
+metadata:
+  name: grid-combined-site
+
+spec:
+  runtime:
+    provider: docker
+    clusterPrefix: grid-combined
+
+  network:
+    crossCluster: true
+    dnsZone: grid-combined.test
+
+  clusters:
+    - name: west
+      stacks: [metallb, west-operator-base, vcr-backend, west-site, provider-gateway, consumer-gateway]
+      properties:
+        region: west
+        role: combined
+        siteName: west
+        gatewayImage: "praxis-ai:combined-site-demo"
+        operatorImage: "grid-operator:combined-site-demo"
+        vcrImage: "ghcr.io/neuralmagic/vllm-vcr:vllm0.23"
+        imagePullPolicy: IfNotPresent
+        gatewayImageRepo: "praxis-ai"
+        gatewayImageTag: "combined-site-demo"
+        operatorImageRepo: "grid-operator"
+        operatorImageTag: "combined-site-demo"
+
+    - name: central
+      stacks: [metallb, central-operator-base, vcr-backend, central-site, provider-gateway, consumer-gateway]
+      properties:
+        region: central
+        role: combined
+        siteName: central
+        gatewayImage: "praxis-ai:combined-site-demo"
+        operatorImage: "grid-operator:combined-site-demo"
+        vcrImage: "ghcr.io/neuralmagic/vllm-vcr:vllm0.23"
+        imagePullPolicy: IfNotPresent
+        gatewayImageRepo: "praxis-ai"
+        gatewayImageTag: "combined-site-demo"
+        operatorImageRepo: "grid-operator"
+        operatorImageTag: "combined-site-demo"
+
+    - name: east
+      stacks: [metallb, east-operator-base, vcr-backend, east-site, provider-gateway, consumer-gateway]
+      properties:
+        region: east
+        role: combined
+        siteName: east
+        gatewayImage: "praxis-ai:combined-site-demo"
+        operatorImage: "grid-operator:combined-site-demo"
+        vcrImage: "ghcr.io/neuralmagic/vllm-vcr:vllm0.23"
+        imagePullPolicy: IfNotPresent
+        gatewayImageRepo: "praxis-ai"
+        gatewayImageTag: "combined-site-demo"
+        operatorImageRepo: "grid-operator"
+        operatorImageTag: "combined-site-demo"
+
+  stacks:
+    metallb:
+      description: MetalLB load balancer with auto-configured address pool
+      steps:
+        - type: url
+          url: https://raw.githubusercontent.com/metallb/metallb/v0.14.9/config/manifests/metallb-native.yaml
+          sha256: 951065e85692aa106f1bb5d5a487d9306154923a794ab1d82122881cbaf588e4
+        - type: wait
+          resource: deployment/controller
+          namespace: metallb-system
+          condition: available
+          timeout: "120s"
+        - type: metallb-auto-pool
+          name: forge-pool
+
+    west-operator-base:
+      description: West Grid operator initial deployment with SWIM LoadBalancer
+      steps:
+        - type: helm
+          release: grid-operator
+          chart: charts/grid-operator
+          version: "0.1.0"
+          namespace: grid-system
+          values:
+            image:
+              repository: "{{ cluster.properties.operatorImageRepo }}"
+              tag: "{{ cluster.properties.operatorImageTag }}"
+              pullPolicy: "{{ cluster.properties.imagePullPolicy }}"
+            swim:
+              siteName: "west"
+              seeds: ""
+              service:
+                enabled: true
+                type: "LoadBalancer"
+            gateway:
+              serviceName: "provider-gateway"
+              port: "8443"
+        - type: wait
+          resource: deployment/grid-operator
+          namespace: grid-system
+          condition: available
+          timeout: "120s"
+        - type: capture
+          resource: svc/grid-operator-swim
+          namespace: grid-system
+          jsonpath: "{.status.loadBalancer.ingress[0].ip}"
+          key: swim-lb-ip
+          timeout: "60s"
+          interval: "2s"
+
+    central-operator-base:
+      description: Central Grid operator initial deployment with SWIM LoadBalancer
+      steps:
+        - type: helm
+          release: grid-operator
+          chart: charts/grid-operator
+          version: "0.1.0"
+          namespace: grid-system
+          values:
+            image:
+              repository: "{{ cluster.properties.operatorImageRepo }}"
+              tag: "{{ cluster.properties.operatorImageTag }}"
+              pullPolicy: "{{ cluster.properties.imagePullPolicy }}"
+            swim:
+              siteName: "central"
+              seeds: ""
+              service:
+                enabled: true
+                type: "LoadBalancer"
+            gateway:
+              serviceName: "provider-gateway"
+              port: "8443"
+        - type: wait
+          resource: deployment/grid-operator
+          namespace: grid-system
+          condition: available
+          timeout: "120s"
+        - type: capture
+          resource: svc/grid-operator-swim
+          namespace: grid-system
+          jsonpath: "{.status.loadBalancer.ingress[0].ip}"
+          key: swim-lb-ip
+          timeout: "60s"
+          interval: "2s"
+
+    east-operator-base:
+      description: East Grid operator initial deployment with SWIM LoadBalancer
+      steps:
+        - type: helm
+          release: grid-operator
+          chart: charts/grid-operator
+          version: "0.1.0"
+          namespace: grid-system
+          values:
+            image:
+              repository: "{{ cluster.properties.operatorImageRepo }}"
+              tag: "{{ cluster.properties.operatorImageTag }}"
+              pullPolicy: "{{ cluster.properties.imagePullPolicy }}"
+            swim:
+              siteName: "east"
+              seeds: ""
+              service:
+                enabled: true
+                type: "LoadBalancer"
+            gateway:
+              serviceName: "provider-gateway"
+              port: "8443"
+        - type: wait
+          resource: deployment/grid-operator
+          namespace: grid-system
+          condition: available
+          timeout: "120s"
+        - type: capture
+          resource: svc/grid-operator-swim
+          namespace: grid-system
+          jsonpath: "{.status.loadBalancer.ingress[0].ip}"
+          key: swim-lb-ip
+          timeout: "60s"
+          interval: "2s"
+
+    vcr-backend:
+      description: vllm-vcr inference backend for demo scenarios
+      steps:
+        - type: manifest
+          path: resources/common/grid-system-namespace.yaml
+        - type: template-manifest
+          path: resources/common/vcr-provider-workload.yaml
+        - type: manifest
+          path: resources/common/backend-network-policy.yaml
+        - type: wait
+          resource: deployment/vcr-inference-{{ cluster.name }}
+          namespace: grid-system
+          condition: available
+          timeout: "120s"
+
+    west-site:
+      description: West combined site with Grid CRs via grid-site chart
+      steps:
+        - type: helm
+          release: grid-site
+          chart: charts/grid-site
+          version: "0.1.0"
+          namespace: grid-system
+          values:
+            commonLabels:
+              grid.praxis-proxy.io/auto-discover-sites: "true"
+            gridNetwork:
+              name: grid-combined-site
+              gridId: grid-combined-site-v1
+              region: west
+              zone: west-1
+              swim:
+                probeInterval: "5s"
+                suspicionTimeout: "15s"
+                gossipNodes: 3
+              tls:
+                caSecretRef:
+                  name: consumer-gateway-tls
+                  namespace: grid-system
+                siteSecretRef:
+                  name: consumer-gateway-tls
+                  namespace: grid-system
+              gatewayRefs:
+                - name: consumer-gateway
+                  namespace: grid-system
+                  localSiteName: west
+            gridSite:
+              name: west
+              region: west
+              zone: west-1
+              providerSiteLabel: west
+            inferenceProviders:
+              - name: vcr-west-provider
+                gridNetworkRef: grid-combined-site
+                providerKind: vllm-vcr
+                backendKind: local
+                endpoint: "http://vcr-inference-west.grid-system.svc.cluster.local:8000"
+                siteSelector:
+                  matchLabels:
+                    grid.praxis-proxy.io/provider-site: west
+                accessPolicy:
+                  siteSelector:
+                    matchLabels: {}
+                models:
+                  - name: Qwen/Qwen3-0.6B
+                    capabilities:
+                      - text_generation
+                    contextWindow: 4096
+                healthCheck:
+                  path: /health
+                  interval: "30s"
+                  timeout: "5s"
+
+    central-site:
+      description: Central combined site with Grid CRs via grid-site chart
+      steps:
+        - type: helm
+          release: grid-site
+          chart: charts/grid-site
+          version: "0.1.0"
+          namespace: grid-system
+          values:
+            commonLabels:
+              grid.praxis-proxy.io/auto-discover-sites: "true"
+            gridNetwork:
+              name: grid-combined-site
+              gridId: grid-combined-site-v1
+              region: central
+              zone: central-1
+              swim:
+                probeInterval: "5s"
+                suspicionTimeout: "15s"
+                gossipNodes: 3
+              tls:
+                caSecretRef:
+                  name: consumer-gateway-tls
+                  namespace: grid-system
+                siteSecretRef:
+                  name: consumer-gateway-tls
+                  namespace: grid-system
+              gatewayRefs:
+                - name: consumer-gateway
+                  namespace: grid-system
+                  localSiteName: central
+            gridSite:
+              name: central
+              region: central
+              zone: central-1
+              providerSiteLabel: central
+            inferenceProviders:
+              - name: vcr-central-provider
+                gridNetworkRef: grid-combined-site
+                providerKind: vllm-vcr
+                backendKind: local
+                endpoint: "http://vcr-inference-central.grid-system.svc.cluster.local:8000"
+                siteSelector:
+                  matchLabels:
+                    grid.praxis-proxy.io/provider-site: central
+                accessPolicy:
+                  siteSelector:
+                    matchLabels: {}
+                models:
+                  - name: Qwen/Qwen3-0.6B
+                    capabilities:
+                      - text_generation
+                    contextWindow: 4096
+                healthCheck:
+                  path: /health
+                  interval: "30s"
+                  timeout: "5s"
+
+    east-site:
+      description: East combined site with Grid CRs via grid-site chart
+      steps:
+        - type: helm
+          release: grid-site
+          chart: charts/grid-site
+          version: "0.1.0"
+          namespace: grid-system
+          values:
+            commonLabels:
+              grid.praxis-proxy.io/auto-discover-sites: "true"
+            gridNetwork:
+              name: grid-combined-site
+              gridId: grid-combined-site-v1
+              region: east
+              zone: east-1
+              swim:
+                probeInterval: "5s"
+                suspicionTimeout: "15s"
+                gossipNodes: 3
+              tls:
+                caSecretRef:
+                  name: consumer-gateway-tls
+                  namespace: grid-system
+                siteSecretRef:
+                  name: consumer-gateway-tls
+                  namespace: grid-system
+              gatewayRefs:
+                - name: consumer-gateway
+                  namespace: grid-system
+                  localSiteName: east
+            gridSite:
+              name: east
+              region: east
+              zone: east-1
+              providerSiteLabel: east
+            inferenceProviders:
+              - name: vcr-east-provider
+                gridNetworkRef: grid-combined-site
+                providerKind: vllm-vcr
+                backendKind: local
+                endpoint: "http://vcr-inference-east.grid-system.svc.cluster.local:8000"
+                siteSelector:
+                  matchLabels:
+                    grid.praxis-proxy.io/provider-site: east
+                accessPolicy:
+                  siteSelector:
+                    matchLabels: {}
+                models:
+                  - name: Qwen/Qwen3-0.6B
+                    capabilities:
+                      - text_generation
+                    contextWindow: 4096
+                healthCheck:
+                  path: /health
+                  interval: "30s"
+                  timeout: "5s"
+
+    provider-gateway:
+      description: Praxis provider gateway with mTLS and credential mounts
+      steps:
+        - type: helm
+          release: provider-gateway
+          chart: charts/praxis-gateway
+          version: "0.1.0"
+          namespace: grid-system
+          values:
+            fullnameOverride: "provider-gateway"
+            image:
+              repository: "{{ cluster.properties.gatewayImageRepo }}"
+              tag: "{{ cluster.properties.gatewayImageTag }}"
+              pullPolicy: "{{ cluster.properties.imagePullPolicy }}"
+            podSecurityContext:
+              runAsUser: 100
+              runAsGroup: 101
+            resources:
+              requests:
+                cpu: 100m
+                memory: 64Mi
+              limits:
+                cpu: 500m
+                memory: 256Mi
+            config:
+              existingConfigMap: "provider-gateway-config"
+            port:
+              containerPort: 8443
+              name: "https-mtls"
+            service:
+              type: "LoadBalancer"
+              port: 8443
+            health:
+              readiness:
+                tcpSocket:
+                  port: "https-mtls"
+                initialDelaySeconds: 3
+                periodSeconds: 5
+              liveness:
+                tcpSocket:
+                  port: "https-mtls"
+                initialDelaySeconds: 5
+                periodSeconds: 10
+            tls:
+              enabled: true
+              existingSecret: "provider-gateway-tls"
+            credentials:
+              - name: "vcr-inference-credential"
+                mountPath: "/etc/praxis/credentials/vcr-inference"
+            podLabels:
+              grid.praxis-proxy.io/backend-access: "provider-gateway"
+              grid.praxis-proxy.io/provider-site: "{{ cluster.name }}"
+        - type: wait
+          resource: deployment/provider-gateway
+          namespace: grid-system
+          condition: available
+          timeout: "120s"
+        - type: capture
+          resource: svc/provider-gateway
+          namespace: grid-system
+          jsonpath: "{.status.loadBalancer.ingress[0].ip}"
+          key: provider-gateway-ip
+          timeout: "60s"
+          interval: "2s"
+
+    consumer-gateway:
+      description: Praxis consumer gateway with operator-managed overlay
+      steps:
+        - type: template-file
+          source: configs/consumer/praxis.yaml
+          target: .forge/runtime/{{ cluster.name }}/consumer/praxis.yaml
+        - type: exec
+          command:
+            - bash
+            - -c
+            - >-
+              kubectl --context kind-grid-combined-{{ cluster.name }} -n grid-system
+              create configmap consumer-gateway-config
+              --from-file=praxis.yaml=.forge/runtime/{{ cluster.name }}/consumer/praxis.yaml
+              --dry-run=client -o yaml |
+              kubectl --context kind-grid-combined-{{ cluster.name }} apply -f -
+        - type: helm
+          release: consumer-gateway
+          chart: charts/praxis-gateway
+          version: "0.1.0"
+          namespace: grid-system
+          values:
+            fullnameOverride: "consumer-gateway"
+            image:
+              repository: "{{ cluster.properties.gatewayImageRepo }}"
+              tag: "{{ cluster.properties.gatewayImageTag }}"
+              pullPolicy: "{{ cluster.properties.imagePullPolicy }}"
+            podSecurityContext:
+              runAsUser: 100
+              runAsGroup: 101
+            resources:
+              requests:
+                cpu: 100m
+                memory: 64Mi
+              limits:
+                cpu: 500m
+                memory: 256Mi
+            config:
+              existingConfigMap: "consumer-gateway-config"
+            service:
+              type: "LoadBalancer"
+            overlay:
+              enabled: true
+              existingConfigMap: "grid-overlay-grid-combined-site-consumer-gateway"
+            tls:
+              enabled: true
+              existingSecret: "consumer-gateway-tls"
+            podLabels:
+              grid.praxis-proxy.io/consumer-site: "{{ cluster.name }}"
+        - type: wait
+          resource: deployment/consumer-gateway
+          namespace: grid-system
+          condition: available
+          timeout: "120s"
+        - type: capture
+          resource: svc/consumer-gateway
+          namespace: grid-system
+          jsonpath: "{.status.loadBalancer.ingress[0].ip}"
+          key: consumer-gateway-ip
+          timeout: "60s"
+          interval: "2s"

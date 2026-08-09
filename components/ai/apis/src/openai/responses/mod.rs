@@ -1,0 +1,537 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Praxis Contributors
+
+//! Responses API filters: format classifier and request validation.
+//!
+//! Classifies requests as Responses API, Chat Completions, unknown
+//! JSON, invalid JSON, or non-JSON. Requests matching Responses API
+//! sub-resource paths (`/v1/responses/{id}`,
+//! `/v1/responses/{id}/input_items`, `/v1/responses/{id}/cancel`,
+//! `/v1/responses/input_tokens`, `/v1/responses/compact`) are
+//! classified by method and path without inspecting the body.
+//! `POST /v1/responses` (create) is classified by body content. A
+//! `GET /v1/responses` `WebSocket` upgrade is classified from the method,
+//! path, and upgrade headers without inferring body-derived facts.
+//! Promotes classification facts to configurable headers, durable
+//! metadata, and filter results for routing. Does not mutate the
+//! request body.
+//!
+//! The `openai_responses_validate` filter runs after the classifier
+//! to validate JSON syntax and extract additional fields without
+//! rejecting provider-owned parameter combinations.
+
+pub(crate) mod agentic_loop;
+pub(crate) mod compact;
+mod config;
+pub(crate) mod config_validation;
+pub(crate) mod doc_extract;
+pub(crate) mod error;
+pub(crate) mod file_resolve;
+pub(crate) mod mcp_dispatch;
+pub(crate) mod model_rewrite;
+pub(crate) mod openai_mcp_tool_resolve;
+pub(crate) mod openai_responses_proxy;
+pub(crate) mod openai_tool_parse;
+pub(crate) mod responses_to_chat_completions;
+pub(crate) mod state;
+pub(crate) mod store;
+pub(crate) mod stream_events;
+
+pub use doc_extract::DocExtractFilter;
+pub use file_resolve::FileResolveFilter;
+pub use mcp_dispatch::McpDispatchFilter;
+pub use model_rewrite::ModelRewriteFilter;
+pub use openai_mcp_tool_resolve::McpToolResolveFilter;
+pub use openai_tool_parse::ToolParseFilter;
+pub use store::ResponseStoreFilter;
+
+#[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::needless_raw_strings,
+    clippy::needless_raw_string_hashes,
+    clippy::too_many_lines,
+    reason = "tests"
+)]
+mod tests;
+
+use std::borrow::Cow;
+
+use async_trait::async_trait;
+use bytes::Bytes;
+use praxis_filter::{
+    BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter, HttpFilterContext,
+    builtins::http::{payload_processing::OnInvalidBehavior, value_safety::is_safe_promoted_value},
+    parse_filter_config,
+};
+use tracing::{debug, trace};
+
+use self::config::{ResponsesFormatConfig, build_config};
+use crate::classifier::{
+    AiRequestFormat, ClassifiedRequest, classify_request_body, empty_result, is_responses_path,
+    is_responses_websocket_handshake,
+};
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Maximum length of a body-derived value promoted to headers or filter results.
+const MAX_PROMOTED_VALUE_LEN: usize = 256;
+
+/// Default store name used when registering the response store in the
+/// per-request registry.
+pub(crate) const DEFAULT_STORE_NAME: &str = "default";
+
+/// Metadata key for tenant isolation.
+pub(crate) const TENANT_METADATA_KEY: &str = "responses.tenant_id";
+
+/// Fallback tenant ID when no tenant metadata is present.
+pub(crate) const DEFAULT_TENANT_ID: &str = "default";
+
+// -----------------------------------------------------------------------------
+// ResponsesFormatFilter
+// -----------------------------------------------------------------------------
+
+/// Classifies AI API request bodies and promotes routing facts to
+/// headers, metadata, and filter results without mutating the body.
+///
+/// Classification formats: `openai_responses`, `openai_chat_completions`,
+/// `unknown_json`, `invalid_json`, `non_json`.
+///
+/// A `GET /v1/responses` request with valid HTTP `WebSocket` upgrade headers
+/// is classified as `openai_responses` without inspecting a body. This
+/// handshake classification promotes only the format: model, stream, store,
+/// and mode facts remain absent. An ordinary bodyless `GET /v1/responses`
+/// remains unclassified.
+///
+/// Routing mode for Responses API: `stateful` when the request contains
+/// `previous_response_id`, non-empty `tools`, `store=true` (default when
+/// omitted), `background=true`, `conversation`, or `prompt.id`;
+/// `stateless` when `store=false` with no other stateful markers.
+///
+/// Use with branch chains to route stateful and stateless requests to
+/// different clusters.
+///
+/// # YAML
+///
+/// ```yaml
+/// filter: openai_responses_format
+/// ```
+///
+/// # Full YAML
+///
+/// ```yaml
+/// filter: openai_responses_format
+/// on_invalid: continue
+/// max_body_bytes: 67108864
+/// headers:
+///   format: x-praxis-ai-format
+///   model: x-praxis-ai-model
+///   stream: x-praxis-ai-stream
+///   mode: x-praxis-responses-mode
+/// ```
+pub struct ResponsesFormatFilter {
+    /// Parsed and validated configuration.
+    config: ResponsesFormatConfig,
+}
+
+impl ResponsesFormatFilter {
+    /// Create a filter from parsed YAML config.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if the YAML config is invalid.
+    ///
+    /// [`FilterError`]: praxis_filter::FilterError
+    pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
+        let cfg: ResponsesFormatConfig = parse_filter_config("openai_responses_format", config)?;
+        let validated = build_config(cfg)?;
+        Ok(Box::new(Self { config: validated }))
+    }
+}
+
+#[async_trait]
+impl HttpFilter for ResponsesFormatFilter {
+    fn name(&self) -> &'static str {
+        "openai_responses_format"
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn request_body_mode(&self) -> BodyMode {
+        BodyMode::StreamBuffer {
+            max_bytes: Some(self.config.max_body_bytes),
+        }
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    async fn on_request_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        if !end_of_stream {
+            return Ok(FilterAction::Continue);
+        }
+
+        let bytes = match body.as_ref() {
+            Some(b) => b.as_ref(),
+            None => &[],
+        };
+
+        let (classified, websocket_handshake) = classify_request(ctx, bytes);
+
+        debug!(
+            format = classified.format.as_str(),
+            model = ?classified.model,
+            "classified request"
+        );
+
+        if let Some(action) = handle_invalid_format(classified.format, &self.config) {
+            return Ok(action);
+        }
+
+        let mode = if websocket_handshake {
+            None
+        } else {
+            compute_mode(&classified)
+        };
+
+        write_metadata(ctx, &classified, mode);
+        promote_headers(ctx, &classified, &self.config, mode);
+        promote_filter_results(ctx, &classified, mode)?;
+
+        Ok(FilterAction::Release)
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------------
+
+/// Classify a request from a recognized path/handshake or its body.
+fn classify_request(ctx: &HttpFilterContext<'_>, bytes: &[u8]) -> (ClassifiedRequest, bool) {
+    let websocket_handshake =
+        is_responses_websocket_handshake(&ctx.request.method, ctx.request.uri.path(), &ctx.request.headers);
+    if websocket_handshake || is_responses_path(&ctx.request.method, ctx.request.uri.path()) {
+        debug!(
+            method = %ctx.request.method,
+            path = ctx.request.uri.path(),
+            websocket_handshake,
+            "classified request by method and path"
+        );
+        (empty_result(AiRequestFormat::Responses), websocket_handshake)
+    } else {
+        (classify_request_body(bytes), false)
+    }
+}
+
+/// Check whether the format requires rejection.
+fn handle_invalid_format(format: AiRequestFormat, config: &ResponsesFormatConfig) -> Option<FilterAction> {
+    match config.on_invalid {
+        OnInvalidBehavior::Continue => None,
+        OnInvalidBehavior::Reject | OnInvalidBehavior::Error => {
+            let message = match format {
+                AiRequestFormat::InvalidJson => "invalid JSON body",
+                AiRequestFormat::NonJson => "request body is not JSON",
+                AiRequestFormat::UnknownJson => "unrecognized AI API format",
+                AiRequestFormat::Responses | AiRequestFormat::AnthropicMessages | AiRequestFormat::ChatCompletions => {
+                    return None;
+                },
+            };
+
+            trace!(reason = message, "rejecting unrecognized body");
+            Some(FilterAction::Reject(error::responses_error_rejection(
+                400,
+                "invalid_request_error",
+                message,
+                false,
+            )))
+        },
+    }
+}
+
+/// Determine the routing mode for a Responses API request.
+///
+/// Returns `Some("stateful")` when the request needs orchestration
+/// (conversation history, tools, persistence, or background processing)
+/// and `Some("stateless")` when it can be forwarded directly to a
+/// native Responses backend. Returns `None` for non-Responses formats.
+fn compute_mode(classified: &ClassifiedRequest) -> Option<&'static str> {
+    if classified.format != AiRequestFormat::Responses {
+        return None;
+    }
+    // OpenAI spec: store defaults to true when omitted
+    let stateful = classified.has_previous_response_id
+        || classified.has_tools
+        || classified.store.unwrap_or(true)
+        || classified.background == Some(true)
+        || classified.has_conversation
+        || classified.has_prompt_id;
+    Some(if stateful { "stateful" } else { "stateless" })
+}
+
+/// Write durable metadata that persists across all Pingora lifecycle phases.
+fn write_metadata(ctx: &mut HttpFilterContext<'_>, classified: &ClassifiedRequest, mode: Option<&str>) {
+    ctx.set_metadata("openai_responses_format.format", classified.format.as_str());
+    write_optional_metadata(ctx, classified);
+    write_boolean_metadata(ctx, classified);
+
+    if let Some(m) = mode {
+        ctx.set_metadata("openai_responses_format.mode", m);
+    }
+}
+
+/// Write optional string and boolean-option metadata fields.
+fn write_optional_metadata(ctx: &mut HttpFilterContext<'_>, classified: &ClassifiedRequest) {
+    if let Some(model) = &classified.model
+        && is_safe_promoted_value(model)
+    {
+        ctx.set_metadata("openai_responses_format.model", model.clone());
+    }
+
+    if let Some(stream) = classified.stream {
+        ctx.set_metadata("openai_responses_format.stream", if stream { "true" } else { "false" });
+    }
+
+    if let Some(store) = classified.store {
+        ctx.set_metadata("openai_responses_format.store", if store { "true" } else { "false" });
+    }
+
+    if let Some(background) = classified.background {
+        ctx.set_metadata(
+            "openai_responses_format.background",
+            if background { "true" } else { "false" },
+        );
+    }
+
+    if let Some(max_output_tokens) = classified.max_output_tokens {
+        ctx.set_metadata(
+            "openai_responses_format.max_output_tokens",
+            max_output_tokens.to_string(),
+        );
+    }
+}
+
+/// Write boolean presence flags to metadata.
+fn write_boolean_metadata(ctx: &mut HttpFilterContext<'_>, classified: &ClassifiedRequest) {
+    if classified.has_previous_response_id {
+        ctx.set_metadata("openai_responses_format.has_previous_response_id", "true");
+    }
+    if classified.has_conversation {
+        ctx.set_metadata("openai_responses_format.has_conversation", "true");
+    }
+    if classified.has_tools {
+        ctx.set_metadata("openai_responses_format.has_tools", "true");
+    }
+    if classified.has_prompt_id {
+        ctx.set_metadata("openai_responses_format.has_prompt_id", "true");
+    }
+}
+
+/// Promote classification facts to configurable request headers.
+fn promote_headers(
+    ctx: &mut HttpFilterContext<'_>,
+    classified: &ClassifiedRequest,
+    config: &ResponsesFormatConfig,
+    mode: Option<&str>,
+) {
+    if let Some(header) = &config.headers.format {
+        let format_str = classified.format.as_str();
+        ctx.extra_request_headers
+            .push((Cow::Owned(header.clone()), format_str.to_owned()));
+    }
+
+    if let Some(header) = &config.headers.model
+        && let Some(model) = &classified.model
+        && is_safe_promoted_value(model)
+        && model.len() <= MAX_PROMOTED_VALUE_LEN
+    {
+        ctx.extra_request_headers
+            .push((Cow::Owned(header.clone()), model.clone()));
+    }
+
+    if let Some(header) = &config.headers.stream
+        && let Some(stream) = classified.stream
+    {
+        let val = if stream { "true" } else { "false" };
+        ctx.extra_request_headers
+            .push((Cow::Owned(header.clone()), val.to_owned()));
+    }
+
+    if let Some(header) = &config.headers.mode
+        && let Some(m) = mode
+    {
+        ctx.extra_request_headers
+            .push((Cow::Owned(header.clone()), m.to_owned()));
+    }
+}
+
+/// Promote classification facts to filter results for branch conditions.
+fn promote_filter_results(
+    ctx: &mut HttpFilterContext<'_>,
+    classified: &ClassifiedRequest,
+    mode: Option<&'static str>,
+) -> Result<(), FilterError> {
+    let results = ctx.filter_results.entry("openai_responses_format").or_default();
+
+    results.set("format", classified.format.as_str())?;
+    promote_optional_results(results, classified)?;
+    promote_boolean_results(results, classified)?;
+
+    if let Some(m) = mode {
+        results.set("mode", m)?;
+    }
+
+    Ok(())
+}
+
+/// Promote optional string and boolean-option fields to filter results.
+fn promote_optional_results(
+    results: &mut praxis_filter::FilterResultSet,
+    classified: &ClassifiedRequest,
+) -> Result<(), FilterError> {
+    if let Some(model) = &classified.model
+        && is_safe_promoted_value(model)
+        && model.len() <= MAX_PROMOTED_VALUE_LEN
+    {
+        results.set("model", model.clone())?;
+    }
+
+    if let Some(stream) = classified.stream {
+        results.set("stream", if stream { "true" } else { "false" })?;
+    }
+
+    if let Some(store) = classified.store {
+        results.set("store", if store { "true" } else { "false" })?;
+    }
+
+    if let Some(background) = classified.background {
+        results.set("background", if background { "true" } else { "false" })?;
+    }
+
+    if let Some(max_output_tokens) = classified.max_output_tokens {
+        results.set("max_output_tokens", max_output_tokens.to_string())?;
+    }
+
+    Ok(())
+}
+
+/// Promote boolean presence flags to filter results.
+fn promote_boolean_results(
+    results: &mut praxis_filter::FilterResultSet,
+    classified: &ClassifiedRequest,
+) -> Result<(), FilterError> {
+    if classified.has_previous_response_id {
+        results.set("has_previous_response_id", "true")?;
+    }
+    if classified.has_conversation {
+        results.set("has_conversation", "true")?;
+    }
+    if classified.has_tools {
+        results.set("has_tools", "true")?;
+    }
+    if classified.has_prompt_id {
+        results.set("has_prompt_id", "true")?;
+    }
+
+    Ok(())
+}
+
+/// Return an item that can be sent back as canonical `OpenResponses` input.
+///
+/// Hosted-tool output items remain available in persisted history, but
+/// `OpenResponses` backends do not accept them in a subsequent request. Old
+/// stored rows without the defaulted `type` field are normalized.
+pub(crate) fn canonical_openresponses_replay_item(item: &serde_json::Value) -> Option<serde_json::Value> {
+    if matches!(
+        item.get("type").and_then(serde_json::Value::as_str),
+        Some("item_reference" | "reasoning" | "compaction" | "message" | "function_call" | "function_call_output")
+    ) {
+        return Some(item.clone());
+    }
+    let object = item.as_object()?;
+    let item_type = defaulted_openresponses_item_type(object)?;
+    let mut normalized = object.clone();
+    normalized.insert("type".to_owned(), serde_json::Value::String(item_type.to_owned()));
+    Some(serde_json::Value::Object(normalized))
+}
+
+/// Resolve a schema-defaulted input item type from its distinguishing fields.
+fn defaulted_openresponses_item_type(object: &serde_json::Map<String, serde_json::Value>) -> Option<&'static str> {
+    if object.get("type").is_some_and(|item_type| !item_type.is_null()) {
+        return None;
+    }
+    let legacy_message = matches!(
+        object.get("role").and_then(serde_json::Value::as_str),
+        Some("user" | "system" | "developer" | "assistant")
+    ) && matches!(
+        object.get("content"),
+        Some(serde_json::Value::String(_) | serde_json::Value::Array(_))
+    );
+    if legacy_message {
+        Some("message")
+    } else {
+        object
+            .get("id")
+            .is_some_and(serde_json::Value::is_string)
+            .then_some("item_reference")
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Shared Utilities
+// -----------------------------------------------------------------------------
+
+/// Extract a conversation ID from a request body.
+///
+/// Accepts both string and object forms:
+/// - `"conversation": "conv_abc"`
+/// - `"conversation": {"id": "conv_abc"}`
+pub(crate) fn extract_conversation_id(body: &serde_json::Value) -> Option<String> {
+    body.get("conversation").and_then(|c| {
+        c.as_str()
+            .or_else(|| c.get("id").and_then(serde_json::Value::as_str))
+            .map(ToOwned::to_owned)
+    })
+}
+
+/// Append stored response input as valid Responses API item params.
+pub(crate) fn append_stored_input_items(messages: &mut Vec<serde_json::Value>, input: serde_json::Value) {
+    match input {
+        serde_json::Value::Null => {},
+        serde_json::Value::String(text) => messages.push(user_message_item(&text)),
+        serde_json::Value::Array(items) => messages.extend(items),
+        other => messages.push(other),
+    }
+}
+
+/// Build a Responses API user message item from string input.
+pub(crate) fn user_message_item(text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "message",
+        "role": "user",
+        "content": text,
+    })
+}
+
+pub(crate) mod rehydrate;
+pub(crate) mod validate;
+pub(crate) mod web_search;
+
+pub use agentic_loop::AgenticLoopFilter;
+pub use compact::CompactFilter;
+pub use rehydrate::RehydrateFilter;
+pub use validate::OpenaiResponsesValidateFilter;
+pub use web_search::WebSearchFilter;

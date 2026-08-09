@@ -1,0 +1,122 @@
+Demo:         grid-llmd-pool-metrics
+Subcommand:   run-grid-llmd-pool-metrics-demo
+Forge config: demos/demos/grid-llmd-pool-metrics/forge.yaml
+Demo root:    demos/demos/grid-llmd-pool-metrics
+Grid repo:    <grid-repository>
+
+   Compiling xtask v0.1.3 (grid/xtask)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.02s
+   Compiling xtask v0.1.3 (grid/xtask)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.95s
+     Running `target/debug/xtask env run-grid-llmd-pool-metrics-demo --forge-config demos/demos/grid-llmd-pool-metrics/forge.yaml --quick --teardown`
+===============================================================================
+Grid llm-d Pool-Metrics Routing Demo
+Mode: quick
+Metrics transport: direct-http
+Forge config: demos/demos/grid-llmd-pool-metrics/forge.yaml
+Demo root:    demos/demos/grid-llmd-pool-metrics
+===============================================================================
+  Images:
+    gateway:      ghcr.io/praxis-proxy/grid-ai-rollup:v0.1.3
+    operator:     ghcr.io/praxis-proxy/grid-operator:v0.1.3
+    epp:          ghcr.io/llm-d/llm-d-inference-scheduler:v0.8.0
+    vcr:          ghcr.io/neuralmagic/vllm-vcr:vllm0.23
+    overlay-sync: ghcr.io/praxis-proxy/grid-overlay-sync:v0.1.3
+  registry image mode: images will be pulled by each cluster
+
+[SETUP 1/10] Validating Forge config
+  [OK] Config: demos/demos/grid-llmd-pool-metrics/.forge.resolved.yaml
+
+[SETUP 2/10] Generating TLS certificates (gateway only)
+  reusing existing CA certificate
+  reusing cert for pool-a
+  reusing cert for pool-b
+  reusing wrong-org cert
+  [OK] TLS certificates generated for pool-a, pool-b
+
+[SETUP 3/10] Creating two Kind clusters: pool-a, pool-b
+
+[SETUP 4/10] Loading container images into clusters
+  [OK] Registry image mode: skipped local Kind image loading
+
+[SETUP 5/10] Installing MetalLB and Grid operators
+  [OK] pool-a: MetalLB and operator ready
+  [OK] pool-b: MetalLB and operator ready
+
+[SETUP 6/10] Seeding SWIM cross-cluster membership
+  pool-a: SWIM LB IP = 172.18.255.231
+  pool-b: SWIM LB IP = 172.18.255.211
+  pool-a: seeds=172.18.255.211:7946
+  pool-b: seeds=172.18.255.231:7946
+deployment "grid-operator" successfully rolled out
+  [OK] pool-a: operator restarted with SWIM seeds
+deployment "grid-operator" successfully rolled out
+  [OK] pool-b: operator restarted with SWIM seeds
+
+[SETUP 7/10] Deploying vllm-vcr backends and EPP
+  [OK] pool-a: vcr-1, vcr-2, and EPP running
+  [OK] pool-b: vcr-1, vcr-2, and EPP running
+
+[SETUP 8/10] Installing provider trust and credentials
+secret/consumer-gateway-tls unchanged
+secret/provider-gateway-tls unchanged
+secret/vcr-inference-credential created
+  [OK] pool-a: TLS secrets and credentials installed
+secret/consumer-gateway-tls unchanged
+secret/provider-gateway-tls unchanged
+secret/vcr-inference-credential created
+  [OK] pool-b: TLS secrets and credentials installed
+
+[SETUP 9/10] Deploying Grid site resources and gateways
+  [OK] pool-a: site and provider-gateway deployed
+  [OK] pool-b: site and provider-gateway deployed
+  [OK] pool-a: consumer-gateway deployed
+  [OK] pool-b: consumer-gateway deployed
+
+[SETUP 10/10] Waiting for overlay convergence
+  pool-a: authorizing remote provider sites
+  [OK] GridSite "grid-llmd-pool-metrics-pool-b" auto-created by operator (gridNetworkRef="grid-llmd-pool-metrics")
+  [OK] GridSite "grid-llmd-pool-metrics-pool-b": advertised certificate matches the staged identity
+  [OK] GridSite "grid-llmd-pool-metrics-pool-b": canonicalFingerprints + serverName="pool-b.grid.internal" patched
+  [OK] GridSite "grid-llmd-pool-metrics-pool-b": phase="Active" (confirmed)
+  pool-b: authorizing remote provider sites
+  [OK] GridSite "grid-llmd-pool-metrics-pool-a" auto-created by operator (gridNetworkRef="grid-llmd-pool-metrics")
+  [OK] GridSite "grid-llmd-pool-metrics-pool-a": advertised certificate matches the staged identity
+  [OK] GridSite "grid-llmd-pool-metrics-pool-a": canonicalFingerprints + serverName="pool-a.grid.internal" patched
+  [OK] GridSite "grid-llmd-pool-metrics-pool-a": phase="Active" (confirmed)
+  [OK] All auto-discovered remote GridSites authorized and Active
+  [OK] pool-a: overlay converged with both providers
+  [OK] pool-b: overlay converged with both providers
+
+[READY] Environment deployed
+
+===============================================================================
+ENVIRONMENT READY - Starting proof scenarios
+===============================================================================
+
+  [BASELINE] Waiting for pool-a to become preferred at idle
+  [BASELINE] Pool A is preferred (rank=0, queue=0.0); sending verification traffic
+  [BASELINE] Request attributed to pool-a -- baseline confirmed
+
+  LLM-D POOL ROUTING DECISION
+  State: BASELINE
+
+                   Queue  Capacity  Pressure  KV Cache   Score  Rank
+       Cluster A     0.0         4      0.00      1.00    1.00     0
+       Cluster B     0.0         4      0.00      1.00    1.00     1
+
+          Signal Locality Queue    KV Prefix Latency  Cost  Total
+       Cluster A     0.00  1.00  0.00   0.00    0.00  0.00   1.00
+       Cluster B     0.00  1.00  0.00   0.00    0.00  0.00   1.00
+
+  Grid preference: CLUSTER A
+  Reason: Both pools idle. Pool A outscores Pool B on locality (local=3.0 vs remote=1.5).
+
+
+[TEARDOWN] Removing Kind clusters
+  [OK] Teardown complete
+
+===============================================================================
+DEMO PASSED  (105.0s)
+Evidence: demos/demos/grid-llmd-pool-metrics/evidence/20260809T032519Z/evidence.json
+===============================================================================

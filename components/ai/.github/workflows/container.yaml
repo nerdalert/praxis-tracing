@@ -1,0 +1,49 @@
+name: Container
+
+# ------------------------------------------------------------------------------
+# Workflow Settings
+# ------------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # Build & Run Container
+  # ----------------------------------------------------------------------------
+
+  build-and-run:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build container image
+        run: docker build -t praxis-ai:ci -f Containerfile .
+
+      - name: Run container
+        run: docker run -d --name praxis-ai praxis-ai:ci
+
+      - name: Wait for healthy
+        run: |
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' praxis-ai 2>/dev/null || echo "starting")
+            if [ "${status}" = "healthy" ]; then
+              echo "Container is healthy"
+              exit 0
+            fi
+            echo "Waiting for container health (${i}/30): ${status}"
+            sleep 2
+          done
+          echo "Container failed to become healthy"
+          docker inspect --format='{{json .State.Health}}' praxis-ai
+          docker logs praxis-ai
+          exit 1
+
+      - name: Stop container
+        if: always()
+        run: docker rm -f praxis-ai

@@ -1,0 +1,56 @@
+# Praxis AI configuration for real tracing validation.
+#
+# Routes requests through the intelligent_route filter with two
+# candidate providers, allowing trace context propagation to be
+# verified against real Jaeger spans.
+#
+# Port assignments:
+#   8090 — Praxis proxy listener
+#   9100 — Mock backend pool-a
+#   9101 — Mock backend pool-b
+#   9903 — Praxis admin
+
+listeners:
+  - name: proxy
+    address: "127.0.0.1:8090"
+    filter_chains:
+      - tracing-main
+
+filter_chains:
+  - name: tracing-main
+    filters:
+      - filter: json_body_field
+        field: model
+        header: X-Model
+
+      - filter: intelligent_route
+        local_site: site-a
+        model_header: X-Model
+        provider_hop_clusters:
+          - pool-a-backend
+          - pool-b-backend
+        candidates:
+          - kind: inference_model
+            name: test-model-a
+            site: site-a
+            cluster: pool-a-backend
+            fresh: true
+
+          - kind: inference_model
+            name: test-model-b
+            site: site-b
+            cluster: pool-b-backend
+            fresh: true
+
+      - filter: load_balancer
+        clusters:
+          - name: pool-a-backend
+            endpoints:
+              - "127.0.0.1:9100"
+          - name: pool-b-backend
+            endpoints:
+              - "127.0.0.1:9101"
+
+admin:
+  address: "127.0.0.1:9903"
+shutdown_timeout_secs: 3

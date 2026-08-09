@@ -1,0 +1,658 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Praxis Contributors
+
+//! [`OpenaiConversationsFilter`] handles all `/v1/conversations`
+//! endpoints locally via `FilterAction::Reject`, backed by the
+//! `ConversationItemStore` trait.
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use bytes::Bytes;
+use praxis_filter::{
+    FilterAction, FilterError, HttpFilter, HttpFilterContext, Rejection,
+    body::{BodyAccess, BodyMode, MAX_JSON_BODY_BYTES},
+    parse_filter_config,
+};
+use secrecy::ExposeSecret as _;
+use serde_json::Value;
+use tokio::sync::OnceCell;
+use tracing::{debug, trace, warn};
+
+use super::{
+    config::{ConversationsConfig, StorageBackend, revalidate_postgres_host, validate_config},
+    handlers,
+    routes::{self, ConversationOperation, MatchedConversationRoute},
+};
+use crate::{
+    openai::responses::{DEFAULT_TENANT_ID, TENANT_METADATA_KEY, state::ResponsesState},
+    store::{ConversationItemStore, ConversationRecord, PostgresResponseStore, SqliteResponseStore, StoreError},
+};
+
+// -----------------------------------------------------------------------------
+// OpenaiConversationsFilter
+// -----------------------------------------------------------------------------
+
+/// Handles all `/v1/conversations` endpoints locally.
+///
+/// All matched requests are served from the local store and never
+/// forwarded upstream. Unmatched paths pass through as `Continue`.
+///
+/// # YAML
+///
+/// ```yaml
+/// filter: openai_conversations
+/// backend: sqlite
+/// database_url: sqlite://conversations.db?mode=rwc
+/// conversations_table: conversations
+/// items_table: conversation_items
+/// ```
+pub struct OpenaiConversationsFilter {
+    /// Filter configuration (backend, database URL, table names).
+    config: ConversationsConfig,
+    /// Lazily-initialized store; `None` on permanent init failure (SQLite).
+    store: OnceCell<Option<Arc<dyn ConversationItemStore>>>,
+}
+
+/// Per-request state used when another filter forces request-body pre-read
+/// before this filter's header hook has run.
+#[derive(Default)]
+struct ConversationRequestState {
+    /// Whether this filter's `on_request` hook has run for the request.
+    request_filters_ran: bool,
+
+    /// Full body captured by an early pre-read pass.
+    deferred_body: Option<Bytes>,
+}
+
+/// Per-request response-phase state that controls whether append-back
+/// should run during `on_response_body`.
+struct ConversationResponseState {
+    /// Whether response body buffering is armed for append-back.
+    armed: bool,
+}
+
+impl OpenaiConversationsFilter {
+    /// Create a filter from parsed YAML config.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if the YAML config is invalid.
+    pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
+        let cfg: ConversationsConfig = parse_filter_config("openai_conversations", config)?;
+        validate_config(&cfg)?;
+        Ok(Box::new(Self::new(cfg)))
+    }
+
+    /// Wrap a validated config into a new filter instance.
+    fn new(config: ConversationsConfig) -> Self {
+        Self {
+            config,
+            store: OnceCell::new(),
+        }
+    }
+
+    /// Build the configured store backend.
+    async fn build_store(&self) -> Result<Arc<dyn ConversationItemStore>, StoreError> {
+        let responses_table = self.config.responses_table();
+        match self.config.backend {
+            StorageBackend::Sqlite => self.build_sqlite_store(&responses_table).await,
+            StorageBackend::Postgres => Box::pin(self.build_postgres_store(&responses_table)).await,
+        }
+    }
+
+    /// Construct a SQLite-backed store.
+    async fn build_sqlite_store(&self, responses_table: &str) -> Result<Arc<dyn ConversationItemStore>, StoreError> {
+        SqliteResponseStore::new(
+            self.config.database_url.expose_secret(),
+            responses_table,
+            &self.config.conversations_table,
+            Some(&self.config.items_table),
+            self.config.pool.as_ref(),
+        )
+        .await
+        .map(|s| {
+            let arc: Arc<dyn ConversationItemStore> = Arc::new(s);
+            arc
+        })
+    }
+
+    /// Construct a Postgres-backed store.
+    async fn build_postgres_store(&self, responses_table: &str) -> Result<Arc<dyn ConversationItemStore>, StoreError> {
+        revalidate_postgres_host(&self.config)
+            .map_err(|e| StoreError::Unavailable(format!("postgres host validation failed before connect: {e}")))?;
+        let ssl_root_cert = self.config.ssl_root_cert.as_ref().map(|s| {
+            let secret: &str = s.expose_secret();
+            secret
+        });
+        PostgresResponseStore::new(
+            self.config.database_url.expose_secret(),
+            responses_table,
+            &self.config.conversations_table,
+            Some(&self.config.items_table),
+            self.config.ssl_mode,
+            ssl_root_cert,
+            self.config.pool.as_ref(),
+        )
+        .await
+        .map(|s| {
+            let arc: Arc<dyn ConversationItemStore> = Arc::new(s);
+            arc
+        })
+    }
+
+    /// Build the store and log the outcome.
+    async fn build_logged_store(&self) -> Result<Arc<dyn ConversationItemStore>, StoreError> {
+        let store = Box::pin(self.build_store()).await?;
+        debug!(
+            backend = ?self.config.backend,
+            conversations_table = %self.config.conversations_table,
+            items_table = %self.config.items_table,
+            "conversations store initialized"
+        );
+        Ok(store)
+    }
+
+    /// Build and cache the store permanently (SQLite path — no retry on failure).
+    async fn init_permanent_store(&self) -> Option<Arc<dyn ConversationItemStore>> {
+        match Box::pin(self.build_logged_store()).await {
+            Ok(store) => Some(store),
+            Err(e) => {
+                warn!(
+                    backend = ?self.config.backend,
+                    error = %e,
+                    "conversations store initialization failed (permanent)"
+                );
+                None
+            },
+        }
+    }
+
+    /// Return the cached store, initializing on first call.
+    async fn get_or_init_store(&self) -> Option<Arc<dyn ConversationItemStore>> {
+        if matches!(self.config.backend, StorageBackend::Postgres) {
+            match self
+                .store
+                .get_or_try_init(|| async { Box::pin(self.build_logged_store()).await.map(Some) })
+                .await
+            {
+                Ok(store) => store.as_ref().map(Arc::clone),
+                Err(e) => {
+                    warn!(
+                        backend = ?self.config.backend,
+                        error = %e,
+                        "conversations store initialization failed (will retry)"
+                    );
+                    None
+                },
+            }
+        } else {
+            self.store
+                .get_or_init(|| async { Box::pin(self.init_permanent_store()).await })
+                .await
+                .as_ref()
+                .map(Arc::clone)
+        }
+    }
+
+    /// Return the store or a 500 rejection if unavailable.
+    async fn require_store(&self) -> Result<Arc<dyn ConversationItemStore>, FilterError> {
+        self.get_or_init_store()
+            .await
+            .ok_or_else(|| FilterError::from("openai_conversations: store unavailable"))
+    }
+
+    /// Mark the request phase complete and return any body captured earlier.
+    fn mark_request_filters_ran(ctx: &mut HttpFilterContext<'_>) -> Option<Bytes> {
+        ctx.current_filter_id?;
+        let mut state = ctx
+            .remove_filter_state::<ConversationRequestState>()
+            .unwrap_or_default();
+        state.request_filters_ran = true;
+        let deferred_body = state.deferred_body.take();
+        ctx.insert_filter_state(state);
+        deferred_body
+    }
+
+    /// Whether it is safe for the body hook to mutate the local store.
+    fn request_filters_ran(ctx: &HttpFilterContext<'_>) -> bool {
+        ctx.current_filter_id.is_none()
+            || ctx
+                .get_filter_state::<ConversationRequestState>()
+                .is_some_and(|state| state.request_filters_ran)
+    }
+
+    /// Store a complete request body for handling once `on_request` runs.
+    fn defer_body_until_request_filters(ctx: &mut HttpFilterContext<'_>, body: Option<&Bytes>) -> FilterAction {
+        let mut state = ctx
+            .remove_filter_state::<ConversationRequestState>()
+            .unwrap_or_default();
+        state.deferred_body = Some(body.cloned().unwrap_or_default());
+        ctx.insert_filter_state(state);
+        FilterAction::Release
+    }
+
+    /// Dispatch a matched POST body to the appropriate local handler.
+    async fn handle_post_route(
+        ctx: &HttpFilterContext<'_>,
+        store: &dyn ConversationItemStore,
+        route: &MatchedConversationRoute<'_>,
+        body: &[u8],
+    ) -> Result<FilterAction, FilterError> {
+        match route.spec.operation {
+            ConversationOperation::CreateConversation => handlers::handle_create_conversation(ctx, store, body).await,
+            ConversationOperation::UpdateConversation => {
+                let id = route
+                    .conversation_id()
+                    .ok_or_else(|| FilterError::from("openai_conversations: matched update route missing id"))?;
+                handlers::handle_update_conversation(ctx, store, id, body).await
+            },
+            ConversationOperation::CreateConversationItems => {
+                let id = route
+                    .conversation_id()
+                    .ok_or_else(|| FilterError::from("openai_conversations: matched item create route missing id"))?;
+                handlers::handle_create_items(ctx, store, id, body).await
+            },
+            ConversationOperation::GetConversation
+            | ConversationOperation::DeleteConversation
+            | ConversationOperation::ListConversationItems
+            | ConversationOperation::GetConversationItem
+            | ConversationOperation::DeleteConversationItem => Err(FilterError::from(format!(
+                "openai_conversations: handle_post_route called for non-body operation {:?}",
+                route.spec.operation
+            ))),
+        }
+    }
+
+    /// Persist conversation items synchronously using `block_in_place`.
+    fn append_items_blocking(
+        &self,
+        tenant_id: &str,
+        conversation_id: &str,
+        ctx: &HttpFilterContext<'_>,
+        items: Vec<Value>,
+    ) -> Result<(), FilterError> {
+        let store = self
+            .store
+            .get()
+            .and_then(Option::as_ref)
+            .ok_or_else(|| FilterError::from("openai_conversations: store unavailable for append-back"))?;
+
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::block_in_place(|| {
+            handle.block_on(persist_items(store.as_ref(), tenant_id, conversation_id, ctx, items))
+        })
+    }
+}
+
+// -----------------------------------------------------------------------------
+// HttpFilter Implementation
+// -----------------------------------------------------------------------------
+
+#[async_trait]
+impl HttpFilter for OpenaiConversationsFilter {
+    fn name(&self) -> &'static str {
+        "openai_conversations"
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn request_body_mode(&self) -> BodyMode {
+        BodyMode::StreamBuffer {
+            max_bytes: Some(MAX_JSON_BODY_BYTES),
+        }
+    }
+
+    fn response_body_mode(&self) -> BodyMode {
+        BodyMode::Stream
+    }
+
+    fn needs_request_context(&self) -> bool {
+        true
+    }
+
+    #[expect(clippy::too_many_lines, reason = "dispatcher with one arm per endpoint")]
+    async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        let Some(route) = routes::match_route(ctx.request.method.as_str(), ctx.request.uri.path()) else {
+            if should_append_back(ctx) {
+                drop(self.get_or_init_store().await);
+            }
+            return Ok(FilterAction::Continue);
+        };
+
+        match route.spec.operation {
+            ConversationOperation::GetConversation => {
+                let id = route
+                    .conversation_id()
+                    .ok_or_else(|| FilterError::from("openai_conversations: matched get route missing id"))?;
+                let store = self.require_store().await?;
+                handlers::handle_get_conversation(ctx, store.as_ref(), id).await
+            },
+            ConversationOperation::ListConversationItems => {
+                let id = route
+                    .conversation_id()
+                    .ok_or_else(|| FilterError::from("openai_conversations: matched list route missing id"))?;
+                let store = self.require_store().await?;
+                handlers::handle_list_items(ctx, store.as_ref(), id).await
+            },
+            ConversationOperation::GetConversationItem => {
+                let id = route
+                    .conversation_id()
+                    .ok_or_else(|| FilterError::from("openai_conversations: matched get item route missing id"))?;
+                let item_id = route
+                    .item_id()
+                    .ok_or_else(|| FilterError::from("openai_conversations: matched get item route missing item id"))?;
+                let store = self.require_store().await?;
+                handlers::handle_get_item(ctx, store.as_ref(), id, item_id).await
+            },
+            ConversationOperation::DeleteConversation => {
+                let id = route
+                    .conversation_id()
+                    .ok_or_else(|| FilterError::from("openai_conversations: matched delete route missing id"))?;
+                let store = self.require_store().await?;
+                handlers::handle_delete_conversation(ctx, store.as_ref(), id).await
+            },
+            ConversationOperation::DeleteConversationItem => {
+                let id = route
+                    .conversation_id()
+                    .ok_or_else(|| FilterError::from("openai_conversations: matched delete item route missing id"))?;
+                let item_id = route.item_id().ok_or_else(|| {
+                    FilterError::from("openai_conversations: matched delete item route missing item id")
+                })?;
+                let store = self.require_store().await?;
+                handlers::handle_delete_item(ctx, store.as_ref(), id, item_id).await
+            },
+            ConversationOperation::CreateConversation
+            | ConversationOperation::UpdateConversation
+            | ConversationOperation::CreateConversationItems => {
+                ctx.set_request_body_mode(BodyMode::StreamBuffer {
+                    max_bytes: Some(MAX_JSON_BODY_BYTES),
+                });
+                let deferred_body = Self::mark_request_filters_ran(ctx);
+                let Some(body) = deferred_body else {
+                    return Ok(FilterAction::Continue);
+                };
+                let Some(store) = self.get_or_init_store().await else {
+                    return Ok(FilterAction::Reject(reject_store_unavailable()));
+                };
+                Box::pin(Self::handle_post_route(ctx, store.as_ref(), &route, &body)).await
+            },
+        }
+    }
+
+    async fn on_request_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        if !end_of_stream || ctx.request.method != http::Method::POST {
+            return Ok(FilterAction::Continue);
+        }
+
+        let empty: &[u8] = &[];
+        let bytes = body.as_ref().map_or(empty, |b| b.as_ref());
+
+        let Some(route) = routes::match_route(ctx.request.method.as_str(), ctx.request.uri.path()) else {
+            return Ok(FilterAction::Continue);
+        };
+        if !route.spec.has_request_body() {
+            return Ok(FilterAction::Continue);
+        }
+
+        if !Self::request_filters_ran(ctx) {
+            return Ok(Self::defer_body_until_request_filters(ctx, body.as_ref()));
+        }
+
+        let Some(store) = self.get_or_init_store().await else {
+            return Ok(FilterAction::Reject(reject_store_unavailable()));
+        };
+        Box::pin(Self::handle_post_route(ctx, store.as_ref(), &route, bytes)).await
+    }
+
+    async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        if !should_append_back(ctx) {
+            ctx.insert_filter_state(ConversationResponseState { armed: false });
+            return Ok(FilterAction::Continue);
+        }
+
+        let resp = ctx.response_header.as_ref();
+        let is_success = resp.is_none_or(|r| r.status.is_success());
+        let is_json = resp
+            .and_then(|r| r.headers.get(http::header::CONTENT_TYPE))
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| {
+                ct.split(';')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .eq_ignore_ascii_case("application/json")
+            });
+
+        let armed = is_success && is_json;
+        if !armed {
+            trace!("conversation append-back skipped (non-2xx or non-JSON response)");
+        }
+        ctx.insert_filter_state(ConversationResponseState { armed });
+
+        if armed {
+            ctx.set_response_body_mode(BodyMode::StreamBuffer {
+                max_bytes: Some(MAX_JSON_BODY_BYTES),
+            });
+            drop(self.get_or_init_store().await);
+        }
+
+        Ok(FilterAction::Continue)
+    }
+
+    fn on_response_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        let armed = ctx
+            .get_filter_state::<ConversationResponseState>()
+            .is_some_and(|s| s.armed);
+
+        if !armed {
+            return Ok(FilterAction::Release);
+        }
+
+        if !end_of_stream {
+            return Ok(FilterAction::Continue);
+        }
+
+        let Some(items) = extract_append_back_items(ctx, body) else {
+            return Ok(FilterAction::Continue);
+        };
+
+        let conv_id = items.conversation_id;
+        if let Err(e) = self.append_items_blocking(&items.tenant_id, &conv_id, ctx, items.all_items) {
+            warn!(error = %e, conversation_id = %conv_id, "conversation append-back failed");
+        }
+
+        Ok(FilterAction::Continue)
+    }
+}
+
+/// Whether this request should trigger conversation append-back on
+/// the response path.
+fn should_append_back(ctx: &HttpFilterContext<'_>) -> bool {
+    ctx.get_metadata("openai_responses_format.has_conversation") == Some("true")
+        && ctx.get_metadata("responses.conversation_id").is_some()
+        && ctx.get_metadata("openai_responses_format.stream") != Some("true")
+        && ctx.get_metadata("openai_responses_format.background") != Some("true")
+}
+
+// -----------------------------------------------------------------------------
+// Append-Back
+// -----------------------------------------------------------------------------
+
+/// Collected items for append-back persistence.
+struct AppendBackItems {
+    /// Target conversation ID.
+    conversation_id: String,
+    /// Tenant scope for the conversation.
+    tenant_id: String,
+    /// Input + output items to persist.
+    all_items: Vec<Value>,
+}
+
+/// Extract and merge input+output items from the response body for
+/// append-back. Returns `None` when there is nothing to persist.
+fn extract_append_back_items(ctx: &HttpFilterContext<'_>, body: &Option<Bytes>) -> Option<AppendBackItems> {
+    let bytes = body.as_ref().filter(|b| !b.is_empty())?;
+    let conv_id = ctx.get_metadata("responses.conversation_id")?.to_owned();
+    let tenant_id = ctx
+        .get_metadata(TENANT_METADATA_KEY)
+        .unwrap_or(DEFAULT_TENANT_ID)
+        .to_owned();
+
+    let all_items = merge_input_output_items(ctx, bytes)?;
+
+    Some(AppendBackItems {
+        conversation_id: conv_id,
+        tenant_id,
+        all_items,
+    })
+}
+
+/// Parse the response body and combine request input items with
+/// response output items. Returns `None` when both are empty.
+fn merge_input_output_items(ctx: &HttpFilterContext<'_>, bytes: &[u8]) -> Option<Vec<Value>> {
+    let response_json: Value = match serde_json::from_slice(bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, "conversation append-back: invalid response JSON");
+            return None;
+        },
+    };
+
+    let status = response_json.get("status").and_then(Value::as_str).unwrap_or_default();
+    if status != "completed" {
+        trace!(status, "conversation append-back skipped (response not completed)");
+        return None;
+    }
+
+    let output_items = response_json
+        .get("output")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let input_items = ctx
+        .extensions
+        .get::<ResponsesState>()
+        .map(|state| state.input.clone())
+        .unwrap_or_default();
+
+    if input_items.is_empty() && output_items.is_empty() {
+        return None;
+    }
+
+    let mut all_items = input_items;
+    all_items.extend(output_items);
+    Some(all_items)
+}
+
+/// Persist items and refresh the denormalized message cache.
+async fn persist_items(
+    store: &dyn ConversationItemStore,
+    tenant_id: &str,
+    conversation_id: &str,
+    ctx: &HttpFilterContext<'_>,
+    items: Vec<Value>,
+) -> Result<(), FilterError> {
+    let max_pos = store
+        .max_item_position(tenant_id, conversation_id)
+        .await
+        .map_err(|e| -> FilterError { Box::new(e) })?;
+    let start_position = max_pos.saturating_add(1);
+    let created_at = handlers::current_timestamp(ctx);
+
+    let records = handlers::build_item_records(ctx, tenant_id, conversation_id, created_at, start_position, items)
+        .map_err(|e| -> FilterError { e.into() })?;
+
+    if records.is_empty() {
+        return Ok(());
+    }
+
+    let count = records.len();
+    store
+        .create_conversation_items(&records)
+        .await
+        .map_err(|e| -> FilterError { Box::new(e) })?;
+
+    refresh_message_cache(store, tenant_id, conversation_id).await;
+    debug!(
+        conversation_id,
+        tenant_id, count, "conversation items appended from response"
+    );
+
+    Ok(())
+}
+
+/// Refresh the denormalized conversation message cache after item mutation.
+async fn refresh_message_cache(store: &dyn ConversationItemStore, tenant_id: &str, conversation_id: &str) {
+    let record = ConversationRecord {
+        conversation_id: conversation_id.to_owned(),
+        tenant_id: tenant_id.to_owned(),
+        created_at: 0,
+        metadata: Value::Object(serde_json::Map::default()),
+        messages: Value::Null,
+    };
+    if let Err(e) = handlers::sync_conversation_messages(store, record).await {
+        warn!(error = %e, conversation_id, "conversation message sync failed after append-back");
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------------
+
+/// Build a 500 rejection when the store is unavailable.
+fn reject_store_unavailable() -> Rejection {
+    let body = serde_json::json!({
+        "error": {
+            "message": "Internal server error.",
+            "type": "server_error",
+        }
+    });
+    Rejection::status(500)
+        .with_header("content-type", "application/json")
+        .with_body(serde_json::to_vec(&body).unwrap_or_default())
+}
+
+#[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "tests")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reject_store_unavailable_returns_500_server_error() {
+        let rejection = reject_store_unavailable();
+        assert_eq!(rejection.status, 500);
+        let body: Value = serde_json::from_slice(rejection.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["error"]["type"], "server_error");
+        assert_eq!(body["error"]["message"], "Internal server error.");
+    }
+
+    #[test]
+    fn reject_store_unavailable_sets_json_content_type() {
+        let rejection = reject_store_unavailable();
+        let ct = rejection
+            .headers
+            .iter()
+            .find(|(k, _)| k == "content-type")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(ct, Some("application/json"), "should set application/json content-type");
+    }
+}

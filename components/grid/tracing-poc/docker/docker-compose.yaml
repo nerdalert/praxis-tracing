@@ -1,0 +1,34 @@
+# OpenTelemetry + Jaeger tracing infrastructure for the Grid POC.
+#
+# Architecture:
+#   Grid POC binary --> OTLP HTTP --> OTel Collector --> OTLP gRPC --> Jaeger --> Jaeger UI
+#
+# Usage:
+#   docker compose -f tracing-poc/docker/docker-compose.yaml up -d
+#   docker compose -f tracing-poc/docker/docker-compose.yaml down
+
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:1
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "14269:14269"   # Jaeger admin/health
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:14269/ || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  otel-collector:
+    image: otel/opentelemetry-collector:0.115.0
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml
+    command: ["--config", "/etc/otelcol/config.yaml"]
+    ports:
+      - "4317:4317"     # OTLP gRPC receiver
+      - "4318:4318"     # OTLP HTTP receiver
+    depends_on:
+      jaeger:
+        condition: service_healthy

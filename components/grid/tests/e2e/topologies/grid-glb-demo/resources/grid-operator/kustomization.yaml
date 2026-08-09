@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../../../deploy
+
+images:
+  - name: ghcr.io/praxis-proxy/grid-operator
+    newName: grid-operator
+    newTag: glb-demo
+
+patches:
+  - target:
+      kind: Deployment
+      name: grid-operator
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never

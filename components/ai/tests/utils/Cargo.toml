@@ -1,0 +1,48 @@
+[package]
+name = "praxis-test-utils"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+readme = "../../README.md"
+publish = false
+
+[features]
+praxis-main = ["praxis-ai-proxy/praxis-main"]
+
+[lints]
+workspace = true
+
+[dependencies]
+arc-swap = { workspace = true }
+base64 = { workspace = true }
+praxis = { workspace = true }
+praxis-ai-apis = { workspace = true }
+praxis-ai-proxy = { workspace = true }
+praxis-core = { workspace = true }
+praxis-filter = { workspace = true }
+praxis-protocol = { workspace = true }
+h2 = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+rand = { workspace = true }
+rcgen = { workspace = true }
+reqwest = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+pingora-core = { workspace = true }
+tokio = { workspace = true, features = ["rt", "net", "io-util", "time", "sync"] }
+tracing = { workspace = true }
+url = { workspace = true }
+futures = { workspace = true }
+tokio-rustls = { workspace = true }
+tokio-tungstenite = { workspace = true }
