@@ -7,21 +7,6 @@ This repository contains the validated tracing proof of concept, the browser
 observability UI, runnable demo orchestration, and clean source snapshots of
 the Grid and Praxis AI components used to build the experimental images.
 
-## What is included
-
-- `routing-observability-ui/` — browser dashboard and server-side adapters for
-  Jaeger, GLB, and live llm-d/EPP/VCR data.
-- `grid/` — the minimal Grid source snapshot needed by the tracing POC,
-  including `tracing-layer`, `tracing-poc`, and the scoring engine.
-- `components/grid/` — the full Grid source snapshot used for demo validation.
-- `components/ai/` — the Praxis AI source snapshot used for the OTel-enabled
-  gateway image.
-- `components/demos/` — the GLB, combined-site, and llm-d pool-metrics demo
-  assets. MAAS demos are intentionally not included.
-- `scripts/` — Jaeger/OTel, synthetic POC, real Praxis, and validation
-  orchestration.
-- `public-demos/` — compact demo wrappers and validation documentation.
-
 ## Quick start: synthetic tracing
 
 Prerequisites: Rust, Docker Compose or Podman Compose, Node.js, and an available
@@ -67,6 +52,20 @@ Jaeger and Kubernetes are available. Missing live sources are shown as
 `UNAVAILABLE`; deterministic demo mode requires the explicit
 `ALLOW_SIMULATION=true` opt-in and is never presented as runtime evidence.
 
+## What is included
+
+- `routing-observability-ui/` — browser dashboard and server-side adapters for
+  Jaeger, GLB, and live llm-d/EPP/VCR data.
+- `grid/` — the minimal Grid source snapshot needed by the tracing POC,
+  including `tracing-layer`, `tracing-poc`, and the scoring engine.
+- `components/grid/` — the full Grid source snapshot used for demo validation.
+- `components/ai/` — the Praxis AI source snapshot used for the OTel-enabled
+  gateway image.
+- `components/demos/` — the GLB, combined-site, and llm-d pool-metrics demo
+  assets. MAAS demos are intentionally not included.
+- `scripts/` — Jaeger/OTel, synthetic POC, real Praxis, and validation
+  orchestration.
+
 For live llm-d/EPP/VCR metrics, use the pool-metrics Kind contexts:
 
 ```console
@@ -80,18 +79,13 @@ PORT=3001 node server.js
 
 ## Demo assets
 
-The validated VCR-backed pool-metrics demo is in
-[`components/demos/grid-llmd-pool-metrics/`](components/demos/grid-llmd-pool-metrics/readme.md).
-Its authoritative runtime instructions cover the two-cluster llm-d/EPP,
-vllm-vcr, scoring, pressure, failover, recovery, and optional metrics-mTLS
-workflow. For a live presentation, follow that README's Live UI and Demo
-Observation section; do not run the automated test suites as part of the
-presentation workflow.
+- **[Grid llm-d pool metrics](components/demos/grid-llmd-pool-metrics/readme.md)** — VCR-backed two-cluster llm-d/EPP scoring, pressure, failover, recovery, and optional metrics-mTLS.
+- **[Grid GLB demo](components/demos/grid-glb-demo/readme.md)** — multi-hop global load balancing through GTM, edge, and provider gateways.
+- **[Grid combined-site](components/demos/grid-combined-site/readme.md)** — colocated multi-site routing with the same VCR-backed provider pattern.
 
-The multi-hop global load-balancing demo is in
-[`components/demos/grid-glb-demo/`](components/demos/grid-glb-demo/readme.md).
-The related colocated combined-site topology is in
-[`components/demos/grid-combined-site/`](components/demos/grid-combined-site/readme.md).
+These are the canonical demo assets. For a live presentation, follow the
+selected demo README's runtime and observation instructions; do not run the
+automated test suites as part of the presentation workflow.
 
 The VCR backend is documented at
 <https://github.com/neuralmagic/vllm-vcr/blob/main/README.md>.
@@ -107,6 +101,9 @@ This is an experimental observability repository. The tracing UI and synthetic
 POC are functional and tested. The production Praxis instrumentation and
 Grid demo integrations are intentionally isolated from the upstream Praxis and
 Grid repositories until the design is complete.
+
+The OTel-enabled Praxis AI feature branch used by the real tracing demos is
+[nerdalert/ai `grid-otel-demo`](https://github.com/nerdalert/ai/tree/grid-otel-demo).
 
 See `runbook.md` for the reproducible runtime workflow and known limitations.
 

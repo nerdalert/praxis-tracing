@@ -1,3 +1,0 @@
-This checked-in transcript is a placeholder for the OTel-enabled, VCR-backed
-GLB tracing demo. Run `./run.sh --full` from this directory after starting
-the Jaeger/Collector stack to generate fresh runtime evidence.
