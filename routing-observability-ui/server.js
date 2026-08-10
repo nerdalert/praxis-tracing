@@ -14,8 +14,11 @@ const app = express();
 app.use(express.json());
 app.use(express.static(join(__dirname, 'public')));
 
-const PORT = parseInt(process.env.PORT || '8080', 10);
+const PORT = parseInt(process.env.PORT || '3001', 10);
 const JAEGER_URL = process.env.JAEGER_URL || 'http://localhost:16686';
+// The server-side query endpoint and browser-visible Jaeger UI endpoint may
+// differ when the dashboard is reached through a remote host or tunnel.
+const JAEGER_UI_URL = process.env.JAEGER_UI_URL || JAEGER_URL;
 const VCR_EVIDENCE_DIR = process.env.VCR_EVIDENCE_DIR || null;
 const execFileAsync = promisify(execFile);
 const GLB_KUBECTL_CONTEXT = process.env.GLB_KUBECTL_CONTEXT || 'kind-grid-glb-gtm-emulator';
@@ -28,10 +31,18 @@ const VCR_CONTEXTS = [
   process.env.VCR_KUBECTL_CONTEXT_B || 'kind-grid-llmd-pm-pool-b',
 ];
 const VCR_NAMESPACE = process.env.VCR_NAMESPACE || 'grid-system';
+const VCR_GATEWAY_SERVICE = process.env.VCR_GATEWAY_SERVICE || 'consumer-gateway';
+const VCR_GATEWAY_PORT = Number.parseInt(process.env.VCR_GATEWAY_PORT || '8080', 10);
+const VCR_MODEL = process.env.VCR_MODEL || 'Qwen/Qwen3-0.6B';
 const VCR_QUEUE_CAPACITY = Number.parseFloat(process.env.VCR_QUEUE_CAPACITY || '4');
 const VCR_OVERLAY_CONFIGMAP = process.env.VCR_OVERLAY_CONFIGMAP
   || 'grid-overlay-grid-llmd-pool-metrics-consumer-gateway';
+// Synthetic values are opt-in. A normal deployment must never turn a missing
+// telemetry source into a convincing-looking demo state.
+const ALLOW_SIMULATION = process.env.ALLOW_SIMULATION === 'true';
 let liveVcrCache = { expires: 0, value: null };
+let glbReadiness = { expires: 0, available: false, reason: 'Not checked yet' };
+let vcrReadiness = { expires: 0, available: false, reason: 'Not checked yet' };
 
 // ---------------------------------------------------------------------------
 // State
@@ -41,6 +52,11 @@ let currentMode = 'auto'; // auto, live, demo
 let demoScenario = 'baseline';
 let dataSource = 'glb'; // glb, vcr, combined
 let requestJob = null;
+let loadJob = null;
+const liveGeneratedHistory = [];
+let demoRun = null;
+const eventClients = new Set();
+const replayJobs = new Map();
 
 const SCORING_WEIGHTS = { locality: 3.0, queue_depth: 5.0 };
 
@@ -79,9 +95,41 @@ const DEMO_SCENARIOS = {
   },
 };
 
+const DEMO_SCRIPTS = {
+  presenter: {
+    label: 'Presenter: baseline → pressure → recovery',
+    description: 'A guided route story with visible provider pressure and traffic movement.',
+    phases: [
+      { scenario: 'baseline', label: 'Baseline', seconds: 5, requests: 3 },
+      { scenario: 'pressure', label: 'Pressure and failover', seconds: 8, requests: 6 },
+      { scenario: 'recovery', label: 'Recovery', seconds: 6, requests: 4 },
+    ],
+  },
+  failure: {
+    label: 'Presenter: provider degraded',
+    description: 'Shows a provider becoming unavailable and the alternate route taking over.',
+    phases: [
+      { scenario: 'baseline', label: 'Baseline', seconds: 4, requests: 2 },
+      { scenario: 'degraded', label: 'Provider unhealthy', seconds: 8, requests: 6 },
+      { scenario: 'recovery', label: 'Recovery', seconds: 5, requests: 3 },
+    ],
+  },
+};
+
 // Deterministic mock trace history
 let demoTraceCounter = 0;
 const demoTraceHistory = [];
+
+function emitEvent(type, data) {
+  const payload = `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+  for (const client of eventClients) {
+    try { client.write(payload); } catch { eventClients.delete(client); }
+  }
+}
+
+function effectiveDemoMode(jaegerUp = false) {
+  return ALLOW_SIMULATION && (currentMode === 'demo' || (currentMode === 'auto' && !jaegerUp));
+}
 
 // ---------------------------------------------------------------------------
 // Scoring (mirrors Rust scoring crate logic)
@@ -128,6 +176,43 @@ async function getGlbGatewayIp() {
   return ip;
 }
 
+async function getGlbReadiness() {
+  if (glbReadiness.expires > Date.now()) return glbReadiness;
+  try {
+    const ip = await getGlbGatewayIp();
+    glbReadiness = { expires: Date.now() + 5000, available: true, ip, reason: null };
+  } catch (error) {
+    glbReadiness = { expires: Date.now() + 5000, available: false, reason: error.message };
+  }
+  return glbReadiness;
+}
+
+async function getVcrGatewayIp(targetPool = 'pool-a') {
+  const context = targetPool === 'pool-b' ? VCR_CONTEXTS[1] : VCR_CONTEXTS[0];
+  const { stdout } = await execFileAsync('kubectl', [
+    '--context', context,
+    '-n', VCR_NAMESPACE,
+    'get', 'svc', VCR_GATEWAY_SERVICE,
+    '-o', 'jsonpath={.status.loadBalancer.ingress[0].ip}',
+  ], { timeout: 5000 });
+  const ip = stdout.trim();
+  if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(ip)) {
+    throw new Error(`${VCR_GATEWAY_SERVICE} service has no load-balancer IP`);
+  }
+  return ip;
+}
+
+async function getVcrReadiness() {
+  if (vcrReadiness.expires > Date.now()) return vcrReadiness;
+  try {
+    const ip = await getVcrGatewayIp();
+    vcrReadiness = { expires: Date.now() + 5000, available: true, ip, reason: null };
+  } catch (error) {
+    vcrReadiness = { expires: Date.now() + 5000, available: false, reason: error.message };
+  }
+  return vcrReadiness;
+}
+
 function sendGlbRequest(ip, prompt, sequence) {
   return new Promise((resolve) => {
     const payload = JSON.stringify({
@@ -157,10 +242,55 @@ function sendGlbRequest(ip, prompt, sequence) {
   });
 }
 
+function sendVcrRequest(ip, prompt, sequence, maxTokens = 5) {
+  return new Promise((resolve) => {
+    const payload = JSON.stringify({
+      model: VCR_MODEL,
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: maxTokens,
+    });
+    const req = http.request({
+      hostname: ip,
+      port: VCR_GATEWAY_PORT,
+      path: '/v1/chat/completions',
+      method: 'POST',
+      timeout: 30000,
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+        'X-Session-Id': `dashboard-llmd-${Date.now()}-${sequence}`,
+      },
+    }, (res) => {
+      const provider = res.headers['x-grid-llmd-provider-gateway'] || null;
+      res.resume();
+      res.on('end', () => resolve({
+        status: res.statusCode || 0,
+        ok: res.statusCode >= 200 && res.statusCode < 300,
+        provider,
+      }));
+    });
+    req.on('error', (error) => resolve({ status: 0, ok: false, error: error.message }));
+    req.on('timeout', () => req.destroy(new Error('request timeout')));
+    req.end(payload);
+  });
+}
+
 async function runRequestJob(job, ip) {
   for (let i = 1; i <= job.count; i += 1) {
     if (job.cancelled) break;
+    const startedAt = new Date().toISOString();
+    const started = Date.now();
     const result = await sendGlbRequest(ip, job.prompt, i);
+    job.results.unshift({
+      sequence: i,
+      started_at: startedAt,
+      status: result.status,
+      ok: result.ok,
+      duration_ms: Date.now() - started,
+      trace_id: null,
+      provider: null,
+      route: 'Trace is still being indexed',
+    });
     job.completed += 1;
     if (result.ok) job.succeeded += 1;
     else job.failed += 1;
@@ -171,6 +301,73 @@ async function runRequestJob(job, ip) {
   }
   job.running = false;
   job.finished_at = new Date().toISOString();
+}
+
+async function runVcrRequestJob(job, ip) {
+  for (let start = 1; start <= job.count && !job.cancelled; start += job.concurrency || 1) {
+    const sequences = Array.from({ length: Math.min(job.concurrency || 1, job.count - start + 1) }, (_, offset) => start + offset);
+    await Promise.all(sequences.map(async sequence => {
+      const startedAt = new Date().toISOString();
+      const started = Date.now();
+      const result = await sendVcrRequest(ip, job.prompt, sequence, job.max_tokens);
+      const generatedResult = {
+        sequence,
+        request_id: `llmd_req_${Date.now().toString(36)}_${sequence}`,
+        started_at: startedAt,
+        status: result.status,
+        ok: result.ok,
+        duration_ms: Date.now() - started,
+        trace_id: null,
+        provider: result.provider,
+        route: result.provider ? `consumer-gateway → ${result.provider}` : 'Gateway response received',
+      };
+      job.results.unshift(generatedResult);
+      liveGeneratedHistory.unshift(generatedResult);
+      if (liveGeneratedHistory.length > 200) liveGeneratedHistory.length = 200;
+      job.completed += 1;
+      if (result.ok) job.succeeded += 1;
+      else job.failed += 1;
+      job.last_status = result.status;
+      emitEvent('generation.progress', { job });
+    }));
+    if (start + sequences.length <= job.count && job.interval_ms > 0 && !job.cancelled) {
+      await new Promise(resolve => setTimeout(resolve, job.interval_ms));
+    }
+  }
+  job.running = false;
+  job.finished_at = new Date().toISOString();
+  emitEvent('generation.finished', { job });
+}
+
+// Sustained llm-d pressure is intentionally separate from Generate Requests.
+// The selected pool is only the gateway where pressure enters; Grid remains
+// responsible for the provider selected for each request.
+async function runVcrLoadJob(job, ip) {
+  const deadline = Date.now() + job.duration_seconds * 1000;
+  let sequence = 0;
+  // Rate is the requested total requests/sec. Concurrency controls the burst
+  // size, so six workers at 5 req/sec launch six requests about every 1.2s.
+  const intervalMs = Math.max(50, Math.round(1000 * job.concurrency / job.rate_per_second));
+  while (!job.cancelled && Date.now() < deadline) {
+    const sequences = Array.from({ length: job.concurrency }, () => ++sequence);
+    await Promise.all(sequences.map(async current => {
+      const result = await sendVcrRequest(ip, job.prompt, `load-${job.id}-${current}`, job.max_tokens);
+      job.completed += 1;
+      if (result.ok) job.succeeded += 1;
+      else job.failed += 1;
+      job.last_status = result.status;
+      job.last_provider = result.provider || null;
+      if (result.provider) job.providers[result.provider] = (job.providers[result.provider] || 0) + 1;
+      emitEvent('load.progress', { job });
+    }));
+    if (!job.cancelled && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, intervalMs));
+    }
+  }
+  job.running = false;
+  job.finished_at = new Date().toISOString();
+  job.stopped_reason = job.cancelled ? 'stopped by user' : 'duration complete';
+  emitEvent('load.finished', { job });
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +457,9 @@ function parseJaegerTrace(trace) {
     || s.operationName === 'provider.request');
   const hasTraceparent = !!clientSpan;
 
+  const processes = trace.processes || {};
+  const serviceForProcess = processId => processes[processId]?.serviceName || null;
+
   const spans = trace.spans.map(s => {
     const kind = getTag(s, 'span.kind') || getTag(s, 'otel.kind') || 'internal';
     const refs = s.references || [];
@@ -267,6 +467,8 @@ function parseJaegerTrace(trace) {
     return {
       span_id: s.spanID,
       operation: s.operationName,
+      service_name: serviceForProcess(s.processID),
+      start_time_us: typeof s.startTime === 'number' ? s.startTime : null,
       kind: kind.toUpperCase(),
       duration_us: typeof s.duration === 'number' ? s.duration : null,
       parent_span_id: parentRef ? parentRef.spanID : null,
@@ -281,26 +483,48 @@ function parseJaegerTrace(trace) {
     };
   });
 
-  const processes = trace.processes || {};
+  // Jaeger does not guarantee process-map or span-array order. Reconstruct the
+  // observed network path from the parent/child span graph so the UI describes
+  // the request's causal order rather than ingestion order.
+  const spansById = new Map(spans.map(span => [span.span_id, span]));
+  const childrenByParent = new Map();
+  for (const span of spans) {
+    if (!span.parent_span_id) continue;
+    const children = childrenByParent.get(span.parent_span_id) || [];
+    children.push(span);
+    childrenByParent.set(span.parent_span_id, children);
+  }
+  const roots = spans.filter(span => !span.parent_span_id);
+  roots.sort((a, b) => (a.start_time_us || 0) - (b.start_time_us || 0));
+  const path = [];
+  const visited = new Set();
+  const visit = span => {
+    if (!span || visited.has(span.span_id)) return;
+    visited.add(span.span_id);
+    if (span.service_name && !path.includes(span.service_name)) path.push(span.service_name);
+    const children = [...(childrenByParent.get(span.span_id) || [])]
+      .sort((a, b) => (a.start_time_us || 0) - (b.start_time_us || 0));
+    children.forEach(visit);
+  };
+  roots.forEach(visit);
+  spans.forEach(visit);
+
   const runIds = Object.values(processes).flatMap(p => (p.tags || [])
     .filter(tag => tag.key === 'demo.run_id')
     .map(tag => tag.value));
   const demoRunId = runIds[0] || null;
-  const serviceNames = [...new Set(
-    Object.values(processes)
-      .map(p => p.serviceName)
-      .filter(s => s && s !== 'jaeger-query')
-  )];
+  const serviceNames = path.filter(service => service !== 'jaeger-query');
 
   return {
     trace_id: trace.traceID,
-    jaeger_url: `${JAEGER_URL}/trace/${trace.traceID}`,
+    jaeger_url: `${JAEGER_UI_URL}/trace/${trace.traceID}`,
     span_count: trace.spans.length,
     service_count: serviceNames.length,
     services: serviceNames,
     source,
     demo_run_id: demoRunId,
     has_traceparent: hasTraceparent,
+    // selected.provider is the model, not the selected backend identity.
     selected_provider: getTag(routeSpan, 'selected.provider') || 'unknown',
     selected_cluster: getTag(routeSpan, 'selected.cluster') || 'unknown',
     selected_site: getTag(routeSpan, 'selected.site') || null,
@@ -319,7 +543,22 @@ function parseJaegerTrace(trace) {
 }
 
 async function fetchLivePoolState() {
-  const traces = await fetchLiveTracesAllServices(10);
+  if (dataSource === 'vcr') {
+    const live = await loadLiveVcrState();
+    if (!live) return null;
+    return {
+      pools: live.providers.map(provider => ({
+        ...provider,
+        request_count: 0,
+      })),
+      latest_trace: null,
+      scoring_strategy: live.scoring_strategy,
+      overlay_revision: live.overlay_revision,
+      generated_at: live.generated_at,
+    };
+  }
+
+  const traces = filterRecentTraces(await fetchLiveTracesAllServices(100));
   if (traces.length === 0) return null;
 
   const latest = traces[0];
@@ -351,6 +590,15 @@ async function fetchLivePoolState() {
   const hasAnyScore = pools.some(p => typeof p.score === 'number');
   const inferredStrategy = hasAnyScore ? 'unknown' : 'noMetrics';
   return { pools, latest_trace: latest, scoring_strategy: inferredStrategy };
+}
+
+const LIVE_TRACE_WINDOW_MS = 15 * 60 * 1000;
+
+function filterRecentTraces(traces, from = Date.now() - LIVE_TRACE_WINDOW_MS) {
+  return traces.filter(trace => {
+    const timestamp = Date.parse(trace.timestamp || '');
+    return Number.isFinite(timestamp) && timestamp >= from;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -411,8 +659,9 @@ function generateDemoTrace(scenario, pools) {
   const hex = demoTraceCounter.toString(16).padStart(32, '0');
 
   const trace = {
+    request_id: `req_demo_${Date.now().toString(36)}_${demoTraceCounter.toString(36)}`,
     trace_id: hex,
-    jaeger_url: `${JAEGER_URL}/trace/${hex}`,
+    jaeger_url: `${JAEGER_UI_URL}/trace/${hex}`,
     span_count: 4,
     selected_provider: `llmd-${selected.name}-provider`,
     selected_cluster: selected.name,
@@ -422,12 +671,180 @@ function generateDemoTrace(scenario, pools) {
     duration_us: 15000 + demoTraceCounter * 100,
     timestamp: new Date().toISOString(),
     scenario: scenario,
+    status: scenario === 'degraded' ? 503 : 200,
+    completion: scenario === 'degraded' ? 'failed' : 'completed',
+    model: 'Qwen/Qwen3-0.6B',
+    ttft_ms: scenario === 'pressure' ? 420 : 95,
+    retry_count: scenario === 'pressure' ? 1 : 0,
+    failover: scenario === 'pressure',
+    selection_queue_depth: selected.queue_depth,
+    selection_kv_cache: selected.kv_cache,
+    rank: selected.rank ?? null,
   };
 
   demoTraceHistory.unshift(trace);
   if (demoTraceHistory.length > 50) demoTraceHistory.length = 50;
 
+  emitEvent('request.summary.created', { request: normalizeRequest(trace, 'demo') });
+
   return trace;
+}
+
+function experienceForRequest(request) {
+  const status = Number(request.status || 0);
+  const duration = Number(request.duration_ms || 0);
+  const retryPenalty = Number(request.retry_count || 0) * 8;
+  const statusPenalty = status >= 500 || status === 0 ? 45 : status >= 400 ? 20 : 0;
+  const latencyPenalty = duration > 2000 ? 35 : duration > 1000 ? 18 : duration > 500 ? 8 : 0;
+  const score = Math.max(0, Math.min(100, 100 - retryPenalty - statusPenalty - latencyPenalty));
+  const label = score >= 90 ? 'excellent' : score >= 75 ? 'good' : score >= 55 ? 'degraded' : 'poor';
+  const reliability = status >= 500 || status === 0 ? 20 : status >= 400 ? 65 : 100;
+  const latency = duration > 2000 ? 35 : duration > 1000 ? 65 : duration > 500 ? 85 : 100;
+  const routing = request.routing?.failover ? 84 : 100;
+  const technical = request.trace_quality === 'missing' ? 60 : 95;
+  const confidence = request.trace_quality === 'exact' ? 100 : request.trace_quality === 'simulated' ? 70 : 80;
+  return {
+    score, label,
+    components: { reliability, latency, routing, technical, confidence },
+    reasons: [
+      status >= 400 ? `HTTP ${status || 'unknown'} response` : 'HTTP success',
+      duration ? `${Math.round(duration)}ms total latency` : 'total latency unavailable',
+      request.ttft_ms ? `${Math.round(request.ttft_ms)}ms time to first token` : 'TTFT unavailable',
+      request.retry_count ? `${request.retry_count} retry/failover${request.retry_count === 1 ? '' : 's'}` : 'no retry observed',
+    ],
+    quality: request.trace_quality || 'simulated',
+  };
+}
+
+function normalizeRequest(trace, source = 'jaeger') {
+  const durationMs = typeof trace.duration_ms === 'number'
+    ? trace.duration_ms
+    : typeof trace.duration_us === 'number' ? trace.duration_us / 1000 : null;
+  // Only expose a Jaeger link when this row represents a trace that was
+  // actually indexed by Jaeger. Demo rows and gateway-attributed VCR rows
+  // deliberately have no raw trace; linking them to `#` is misleading and
+  // leaves the browser at the dashboard URL with a confusing fragment.
+  const hasIndexedTrace = source === 'jaeger' || trace.trace_quality === 'exact';
+  const request = {
+    request_id: trace.request_id || `req_${trace.trace_id}`,
+    trace_id: trace.trace_id,
+    jaeger_url: hasIndexedTrace && (trace.jaeger_url || trace.trace_id)
+      ? (trace.jaeger_url || `${JAEGER_UI_URL}/trace/${trace.trace_id}`)
+      : null,
+    started_at: trace.timestamp,
+    duration_ms: durationMs,
+    ttft_ms: trace.ttft_ms ?? null,
+    status: trace.status ?? 200,
+    completion: trace.completion || 'completed',
+    model: trace.model || 'unknown',
+    provider: {
+      stable_id: trace.stable_id || trace.selected_cluster || 'unknown',
+      site: trace.selected_site || null,
+      cluster: trace.selected_cluster || 'unknown',
+      // selected_provider is the requested model (for example Qwen/Qwen3-0.6B).
+      // Use the selected cluster as the provider identity in request views.
+      name: trace.selected_cluster || trace.selected_site || 'unknown',
+    },
+    routing: {
+    rank: trace.rank ?? null,
+      score: trace.provider_score ?? null,
+      admission_state: trace.admission_state || null,
+      selection_tier: trace.selection_tier || null,
+      overlay_revision: trace.overlay_revision || null,
+      decision: trace.routing_decision || null,
+      policy: trace.routing_policy || null,
+      retry_count: trace.retry_count ?? 0,
+      failover: Boolean(trace.failover),
+    },
+    trace_quality: trace.trace_quality || (source === 'demo' ? 'simulated' : trace.span_count ? 'exact' : 'missing'),
+    source: source === 'demo' ? 'simulated' : source,
+    services: trace.services || [],
+    span_count: trace.span_count || trace.spans?.length || 0,
+    spans: trace.spans || [],
+    provenance: {
+      request: source === 'demo' ? 'demo scenario' : source === 'gateway' ? 'consumer gateway response' : 'Jaeger trace',
+      routing: source === 'gateway'
+        ? 'gateway attribution header'
+        : trace.provider_score != null ? 'OTel routing span' : 'not observed',
+      pressure: 'not available at request boundary',
+    },
+    selection_time_metrics: {
+      queue_depth: trace.selection_queue_depth == null ? null : {
+        value: trace.selection_queue_depth,
+        quality: source === 'demo' ? 'simulated' : 'exact',
+        source: source === 'demo' ? 'demo_scenario' : 'epp',
+        observed_at: trace.timestamp,
+      },
+      kv_cache: trace.selection_kv_cache == null ? null : {
+        value: trace.selection_kv_cache,
+        quality: source === 'demo' ? 'simulated' : 'exact',
+        source: source === 'demo' ? 'demo_scenario' : 'epp',
+        observed_at: trace.timestamp,
+      },
+    },
+  };
+  request.experience = experienceForRequest(request);
+  return request;
+}
+
+function normalizeGeneratedRequest(result) {
+  const provider = result.provider || 'unknown';
+  return normalizeRequest({
+    request_id: result.request_id,
+    trace_id: null,
+    timestamp: result.started_at,
+    duration_ms: result.duration_ms,
+    status: result.status,
+    completion: result.ok ? 'completed' : 'failed',
+    model: VCR_MODEL,
+    selected_cluster: provider,
+    services: ['consumer-gateway', provider],
+    trace_quality: 'sampled',
+    routing_decision: 'gateway attribution header',
+  }, 'gateway');
+}
+
+function requestDataset() {
+  if (effectiveDemoMode(false)) {
+    return demoTraceHistory.map(trace => normalizeRequest(trace, 'demo'));
+  }
+  return null;
+}
+
+function encodeCursor(offset, filterHash) {
+  return Buffer.from(JSON.stringify({ v: 1, offset, filter_hash: filterHash })).toString('base64url');
+}
+
+function decodeCursor(value) {
+  if (!value) return { offset: 0, filter_hash: null };
+  try { return JSON.parse(Buffer.from(value, 'base64url').toString('utf8')); } catch { return null; }
+}
+
+async function normalizedRequestDataset() {
+  const demo = requestDataset();
+  if (demo) return demo;
+  const traces = await fetchLiveTracesAllServices(100);
+  const requests = traces.map(trace => normalizeRequest(trace, trace.source === 'unknown' ? 'jaeger' : trace.source));
+  if (dataSource === 'vcr' && liveGeneratedHistory.length) {
+    requests.push(...liveGeneratedHistory.map(normalizeGeneratedRequest));
+    requests.sort((a, b) => (b.started_at || '').localeCompare(a.started_at || ''));
+  }
+  if (dataSource === 'vcr') {
+    const live = await loadLiveVcrState();
+    if (live?.providers?.length) {
+      const providers = new Map(live.providers.map(provider => [provider.site || provider.cluster || provider.name, provider]));
+      for (const request of requests) {
+        const provider = providers.get(request.provider.site) || providers.get(request.provider.cluster) || providers.get(request.provider.name);
+        if (!provider) continue;
+        request.selection_time_metrics = {
+          queue_depth: provider.queue_depth ? { value: provider.queue_depth.value, quality: 'sampled', source: provider.queue_depth.source || 'epp', observed_at: live.generated_at } : null,
+          kv_cache: provider.kv_cache ? { value: provider.kv_cache.value, quality: 'sampled', source: provider.kv_cache.source || 'epp', observed_at: live.generated_at } : null,
+        };
+        request.provenance.pressure = 'latest EPP sample correlated to selected provider; not exact selection-time evidence';
+      }
+    }
+  }
+  return requests;
 }
 
 // ---------------------------------------------------------------------------
@@ -438,7 +855,7 @@ app.get('/api/status', async (_req, res) => {
   const jaegerUp = await isJaegerReachable();
   let effectiveMode = currentMode;
   if (currentMode === 'auto') {
-    effectiveMode = jaegerUp ? 'live' : 'demo';
+    effectiveMode = jaegerUp ? 'live' : ALLOW_SIMULATION ? 'demo' : 'unavailable';
   }
 
   let liveDetail = null;
@@ -452,8 +869,9 @@ app.get('/api/status', async (_req, res) => {
   const liveVcr = await loadLiveVcrState();
   const vcrEvidenceAvailable = !!VCR_EVIDENCE_DIR && existsSync(VCR_EVIDENCE_DIR);
   const vcrAvailable = !!liveVcr || vcrEvidenceAvailable;
+  const glbAvailable = dataSource === 'glb' ? (await getGlbReadiness()).available : false;
   const sourceLabel = dataSource === 'glb'
-    ? (effectiveMode === 'live' ? 'LIVE PRAXIS / GLB' : effectiveMode === 'demo' ? 'MOCK DATA' : 'UNAVAILABLE')
+    ? (effectiveMode === 'demo' ? 'MOCK DATA' : effectiveMode === 'live' && glbAvailable ? 'LIVE PRAXIS / GLB' : 'UNAVAILABLE')
     : dataSource === 'vcr'
     ? (vcrAvailable ? 'LIVE EPP / VCR' : 'UNAVAILABLE')
     : 'COMBINED';
@@ -477,6 +895,9 @@ app.post('/api/mode', (req, res) => {
   if (!['auto', 'live', 'demo'].includes(mode)) {
     return res.status(400).json({ error: 'mode must be auto, live, or demo' });
   }
+  if (mode === 'demo' && !ALLOW_SIMULATION) {
+    return res.status(403).json({ error: 'simulation is disabled', reason: 'Set ALLOW_SIMULATION=true explicitly for local synthetic demo data.' });
+  }
   currentMode = mode;
   if (mode === 'demo') {
     demoScenario = 'baseline';
@@ -488,15 +909,22 @@ app.post('/api/mode', (req, res) => {
 
 app.get('/api/pools', async (_req, res) => {
   const jaegerUp = await isJaegerReachable();
-  let effectiveMode = currentMode === 'auto' ? (jaegerUp ? 'live' : 'demo') : currentMode;
+  let effectiveMode = currentMode === 'auto' ? (jaegerUp ? 'live' : ALLOW_SIMULATION ? 'demo' : 'unavailable') : currentMode;
+  if (effectiveMode === 'live' && !jaegerUp) effectiveMode = currentMode === 'auto' && ALLOW_SIMULATION ? 'demo' : 'unavailable';
 
   if (effectiveMode === 'live' && jaegerUp) {
-    const liveState = await fetchLivePoolState();
+    const liveState = dataSource === 'glb' && !(await getGlbReadiness()).available
+      ? null
+      : await fetchLivePoolState();
     if (liveState) {
       const scored = scoreAndRankPools(liveState.pools);
       return res.json({ mode: 'live', pools: scored, latest_trace: liveState.latest_trace });
     }
-    effectiveMode = 'demo';
+    effectiveMode = 'unavailable';
+  }
+
+  if (effectiveMode === 'unavailable') {
+    return res.json({ mode: 'unavailable', pools: [], latest_trace: null, warning: 'No live telemetry source is available; simulation is disabled.' });
   }
 
   const scenario = DEMO_SCENARIOS[demoScenario] || DEMO_SCENARIOS.baseline;
@@ -514,16 +942,22 @@ app.get('/api/pools', async (_req, res) => {
 app.get('/api/traces', async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit || '20', 10), 100);
   const jaegerUp = await isJaegerReachable();
-  let effectiveMode = currentMode === 'auto' ? (jaegerUp ? 'live' : 'demo') : currentMode;
+  let effectiveMode = currentMode === 'auto' ? (jaegerUp ? 'live' : ALLOW_SIMULATION ? 'demo' : 'unavailable') : currentMode;
+  if (effectiveMode === 'live' && !jaegerUp) effectiveMode = currentMode === 'auto' && ALLOW_SIMULATION ? 'demo' : 'unavailable';
 
   if (effectiveMode === 'live' && jaegerUp) {
-    const traces = await fetchLiveTracesAllServices(limit);
+    const from = req.query.from ? Date.parse(req.query.from) : Date.now() - LIVE_TRACE_WINDOW_MS;
+    const traces = filterRecentTraces(
+      await fetchLiveTracesAllServices(Math.max(limit, 100)),
+      Number.isFinite(from) ? from : undefined,
+    ).slice(0, limit);
     return res.json({ mode: 'live', traces });
   }
 
   res.json({
-    mode: effectiveMode === 'live' ? 'unavailable' : 'demo',
-    traces: demoTraceHistory.slice(0, limit),
+    mode: effectiveMode,
+    traces: effectiveMode === 'demo' ? demoTraceHistory.slice(0, limit) : [],
+    ...(effectiveMode === 'unavailable' ? { warning: 'No live trace source is available; simulation is disabled.' } : {}),
   });
 });
 
@@ -532,6 +966,7 @@ app.post('/api/scenario/:name', (req, res) => {
   if (!DEMO_SCENARIOS[name]) {
     return res.status(400).json({ error: `unknown scenario: ${name}`, available: Object.keys(DEMO_SCENARIOS) });
   }
+  if (!ALLOW_SIMULATION) return res.status(403).json({ error: 'simulation is disabled', reason: 'Set ALLOW_SIMULATION=true explicitly for local synthetic scenarios.' });
   demoScenario = name;
   const scenario = DEMO_SCENARIOS[name];
   const scored = scoreAndRankPools(scenario.pools);
@@ -546,6 +981,10 @@ app.post('/api/scenario/:name', (req, res) => {
 
 app.get('/api/trace/:traceId', async (req, res) => {
   const { traceId } = req.params;
+  const simulatedTrace = demoTraceHistory.find(trace => trace.trace_id === traceId);
+  if (simulatedTrace && effectiveDemoMode(false)) {
+    return res.json({ ...simulatedTrace, source: 'synthetic', spans: [], span_count: 0 });
+  }
   try {
     const result = await jaegerFetch(`/api/traces/${traceId}`);
     if (result.status !== 200 || !result.body.data || result.body.data.length === 0) {
@@ -569,9 +1008,17 @@ app.get('/api/overlay', (_req, res) => {
 
 app.get('/api/providers', async (_req, res) => {
   const jaegerUp = await isJaegerReachable();
-  const effectiveMode = currentMode === 'auto' ? (jaegerUp ? 'live' : 'demo') : currentMode;
+  const effectiveMode = currentMode === 'auto' ? (jaegerUp ? 'live' : ALLOW_SIMULATION ? 'demo' : 'unavailable') : currentMode;
+  const resolvedMode = effectiveMode === 'live' && !jaegerUp ? (currentMode === 'auto' && ALLOW_SIMULATION ? 'demo' : 'unavailable') : effectiveMode;
 
-  if (effectiveMode === 'live' && jaegerUp) {
+  if (resolvedMode === 'live' && dataSource === 'glb' && !(await getGlbReadiness()).available) {
+    return res.json({ mode: 'unavailable', scoring_strategy: null, providers: [], warning: 'The GLB gateway is unavailable; historical Jaeger traces are not used as current GLB provider state.' });
+  }
+  if (resolvedMode === 'live' && dataSource === 'vcr' && !(await loadLiveVcrState()) && !(VCR_EVIDENCE_DIR && existsSync(VCR_EVIDENCE_DIR))) {
+    return res.json({ mode: 'unavailable', scoring_strategy: null, providers: [], warning: 'The llm-d/VCR EPP source is unavailable; historical Jaeger traces are not used as current VCR provider state.' });
+  }
+
+  if (resolvedMode === 'live' && jaegerUp) {
     const liveState = await fetchLivePoolState();
     if (liveState) {
       const overlay = loadOverlayFromFile();
@@ -610,6 +1057,9 @@ app.get('/api/providers', async (_req, res) => {
   }
 
   const overlay = loadOverlayFromFile();
+  if (resolvedMode === 'unavailable' && !overlay) {
+    return res.json({ mode: 'unavailable', scoring_strategy: null, providers: [], warning: 'No live provider source is available; simulation is disabled.' });
+  }
   if (overlay?.overlay?.candidates) {
     const providers = overlay.overlay.candidates.map(c => ({
       name: c.name,
@@ -649,15 +1099,16 @@ app.get('/api/providers', async (_req, res) => {
 
 app.get('/api/timeline', async (_req, res) => {
   const jaegerUp = await isJaegerReachable();
-  const effectiveMode = currentMode === 'auto' ? (jaegerUp ? 'live' : 'demo') : currentMode;
+  const effectiveMode = currentMode === 'auto' ? (jaegerUp ? 'live' : ALLOW_SIMULATION ? 'demo' : 'unavailable') : currentMode;
+  const resolvedMode = effectiveMode === 'live' && !jaegerUp ? (currentMode === 'auto' && ALLOW_SIMULATION ? 'demo' : 'unavailable') : effectiveMode;
 
-  if (effectiveMode === 'live' && jaegerUp) {
+  if (resolvedMode === 'live' && jaegerUp) {
     const traces = await fetchLiveTracesAllServices(50);
     const events = buildTimelineFromTraces(traces);
     return res.json({ mode: 'live', events });
   }
 
-  res.json({ mode: effectiveMode === 'live' ? 'unavailable' : 'demo', events: buildDemoTimeline() });
+  res.json({ mode: resolvedMode, events: resolvedMode === 'demo' ? buildDemoTimeline() : [], ...(resolvedMode === 'unavailable' ? { warning: 'No live timeline source is available; simulation is disabled.' } : {}) });
 });
 
 function buildTimelineFromTraces(traces) {
@@ -746,6 +1197,57 @@ app.get('/api/scenarios', (_req, res) => {
   res.json({ scenarios });
 });
 
+app.get('/api/v1/demo/scripts', (_req, res) => {
+  res.json({ scripts: Object.entries(DEMO_SCRIPTS).map(([id, script]) => ({ id, label: script.label, description: script.description, duration_seconds: script.phases.reduce((sum, phase) => sum + phase.seconds, 0) })) });
+});
+
+app.get('/api/v1/demo/status', (_req, res) => {
+  res.json({ available: Boolean(demoRun), run: demoRun });
+});
+
+app.post('/api/v1/demo/runs', async (req, res) => {
+  const scriptId = req.body?.script_id || 'presenter';
+  const script = DEMO_SCRIPTS[scriptId];
+  if (!script) return res.status(400).json({ error: 'unknown demo script', available: Object.keys(DEMO_SCRIPTS) });
+  if (demoRun?.running) return res.status(409).json({ error: 'demo script already running', run: demoRun });
+  const jaegerUp = await isJaegerReachable();
+  if (!effectiveDemoMode(jaegerUp)) return res.status(403).json({ error: 'demo scripts require demo mode or an unavailable live backend', reason: 'Use a live request target when observing a real environment.' });
+  demoRun = { id: `demo-run-${Date.now().toString(36)}`, script_id: scriptId, label: script.label, running: true, phase_index: -1, phase: 'Starting', started_at: new Date().toISOString(), completed_requests: 0, total_requests: script.phases.reduce((sum, phase) => sum + phase.requests, 0) };
+  emitEvent('demo.started', { run: demoRun });
+  (async () => {
+    for (let index = 0; index < script.phases.length; index += 1) {
+      if (!demoRun?.running) break;
+      const phase = script.phases[index];
+      demoRun.phase_index = index;
+      demoRun.phase = phase.label;
+      demoScenario = phase.scenario;
+      emitEvent('demo.phase', { run: demoRun, expected: DEMO_SCENARIOS[phase.scenario].description });
+      for (let request = 0; request < phase.requests; request += 1) {
+        if (!demoRun?.running) break;
+        generateDemoTrace(phase.scenario, DEMO_SCENARIOS[phase.scenario].pools);
+        demoRun.completed_requests += 1;
+        emitEvent('demo.progress', { run: demoRun });
+        await new Promise(resolve => setTimeout(resolve, Math.max(250, Math.round((phase.seconds * 1000) / phase.requests))));
+      }
+    }
+    if (demoRun) {
+      demoRun.running = false;
+      demoRun.phase = 'Complete';
+      demoRun.finished_at = new Date().toISOString();
+      emitEvent('demo.completed', { run: demoRun });
+    }
+  })().catch(error => {
+    if (demoRun) { demoRun.running = false; demoRun.phase = 'Error'; demoRun.error = error.message; }
+    emitEvent('demo.failed', { run: demoRun });
+  });
+  res.status(202).json({ run: demoRun });
+});
+
+app.post('/api/v1/demo/stop', (_req, res) => {
+  if (demoRun?.running) { demoRun.running = false; demoRun.phase = 'Stopped'; demoRun.finished_at = new Date().toISOString(); emitEvent('demo.stopped', { run: demoRun }); }
+  res.json({ run: demoRun });
+});
+
 // ---------------------------------------------------------------------------
 // Data source selector
 // ---------------------------------------------------------------------------
@@ -766,6 +1268,13 @@ app.post('/api/source', (req, res) => {
   if (!['glb', 'vcr', 'combined'].includes(source)) {
     return res.status(400).json({ error: 'source must be glb, vcr, or combined' });
   }
+  if (dataSource !== source && requestJob?.running) {
+    requestJob.cancelled = true;
+  }
+  if (dataSource !== source && loadJob?.running) {
+    loadJob.cancelled = true;
+  }
+  if (dataSource !== source) requestJob = null;
   dataSource = source;
   res.json({ source: dataSource });
 });
@@ -775,16 +1284,43 @@ app.post('/api/source', (req, res) => {
 // ---------------------------------------------------------------------------
 
 app.get('/api/generate/status', (_req, res) => {
-  res.json({
-    available: dataSource === 'glb' && currentMode !== 'demo',
+  isJaegerReachable().then(jaegerUp => {
+  const simulated = effectiveDemoMode(jaegerUp);
+  if (simulated) {
+    return res.json({
+      available: true,
+      target: 'simulated',
+      reason: 'Demo requests are generated locally and labeled SIMULATED.',
+      job: requestJob,
+    });
+  }
+  if (dataSource === 'vcr') {
+    getVcrReadiness().then(readiness => res.json({
+      available: readiness.available,
+      target: 'llmd-gateway',
+      reason: readiness.available ? null : `llm-d consumer gateway unavailable: ${readiness.reason}`,
+      job: requestJob,
+    }));
+    return;
+  }
+  if (dataSource === 'combined') {
+    return res.json({
+      available: false,
+      target: 'combined-gateway',
+      reason: 'Combined-site live evidence is available, but request generation is not configured for this topology.',
+      job: requestJob,
+    });
+  }
+  getGlbReadiness().then(readiness => res.json({
+    available: readiness.available,
+    target: 'glb-gateway',
+    reason: readiness.available ? null : `GLB gateway unavailable: ${readiness.reason}`,
     job: requestJob,
+  }));
   });
 });
 
 app.post('/api/generate', async (req, res) => {
-  if (dataSource !== 'glb' || currentMode === 'demo') {
-    return res.status(409).json({ error: 'Request generation is available only for live GLB data' });
-  }
   if (requestJob?.running) {
     return res.status(409).json({ error: 'A request generation job is already running', job: requestJob });
   }
@@ -794,6 +1330,98 @@ app.post('/api/generate', async (req, res) => {
   const prompt = typeof req.body?.prompt === 'string' && req.body.prompt.trim()
     ? req.body.prompt.trim().slice(0, 500)
     : 'dashboard observability request';
+
+  const simulated = effectiveDemoMode(await isJaegerReachable());
+  if (simulated) {
+    requestJob = {
+      id: `demo-${Date.now()}`,
+      running: true,
+      target: 'simulated',
+      count,
+      rate_per_second: rate,
+      interval_ms: Math.round(1000 / rate),
+      prompt,
+      completed: 0,
+      succeeded: 0,
+      failed: 0,
+      last_status: null,
+      results: [],
+      started_at: new Date().toISOString(),
+      finished_at: null,
+    };
+    const scenario = demoScenario;
+    (async () => {
+      for (let i = 0; i < count && !requestJob.cancelled; i += 1) {
+        const trace = generateDemoTrace(scenario, DEMO_SCENARIOS[scenario].pools);
+        requestJob.results.unshift({
+          sequence: i + 1,
+          started_at: trace.timestamp,
+          status: trace.status,
+          ok: trace.status >= 200 && trace.status < 400,
+          duration_ms: trace.duration_us / 1000,
+          trace_id: trace.trace_id,
+          request_id: trace.request_id,
+          provider: trace.selected_provider,
+          route: `consumer-gateway → provider-gateway → ${trace.selected_provider} → backend`,
+        });
+        requestJob.completed += 1;
+        requestJob.last_status = trace.status;
+        if (trace.status >= 200 && trace.status < 400) requestJob.succeeded += 1;
+        else requestJob.failed += 1;
+        emitEvent('generation.progress', { job: requestJob });
+        if (i < count - 1 && !requestJob.cancelled) await new Promise(resolve => setTimeout(resolve, requestJob.interval_ms));
+      }
+      requestJob.running = false;
+      requestJob.finished_at = new Date().toISOString();
+      emitEvent('generation.finished', { job: requestJob });
+    })().catch(error => {
+      requestJob.running = false;
+      requestJob.error = error.message;
+      requestJob.finished_at = new Date().toISOString();
+    });
+    return res.status(202).json({ job: requestJob });
+  }
+
+  if (dataSource === 'vcr') {
+    try {
+      const targetPool = req.body?.target_pool === 'pool-b' ? 'pool-b' : 'pool-a';
+      const ip = await getVcrGatewayIp(targetPool);
+      requestJob = {
+        id: `llmd-${Date.now()}`,
+        running: true,
+        count,
+        rate_per_second: rate,
+        interval_ms: Math.round(1000 / rate),
+        target_pool: targetPool,
+        concurrency: Math.min(24, Math.max(1, Number.parseInt(req.body?.concurrency ?? 1, 10) || 1)),
+        max_tokens: Math.min(256, Math.max(1, Number.parseInt(req.body?.max_tokens ?? 5, 10) || 5)),
+        prompt,
+        gateway_ip: ip,
+        gateway_port: VCR_GATEWAY_PORT,
+        completed: 0,
+        succeeded: 0,
+        failed: 0,
+        last_status: null,
+        results: [],
+        started_at: new Date().toISOString(),
+        finished_at: null,
+        target: 'llmd-gateway',
+      };
+      runVcrRequestJob(requestJob, ip).catch((error) => {
+        requestJob.running = false;
+        requestJob.error = error.message;
+        requestJob.finished_at = new Date().toISOString();
+      });
+      emitEvent('generation.started', { job: requestJob });
+      return res.status(202).json({ job: requestJob });
+    } catch (error) {
+      return res.status(503).json({ error: `Unable to find the llm-d consumer gateway: ${error.message}` });
+    }
+  }
+
+  if (dataSource !== 'glb') {
+    return res.status(409).json({ error: 'Live request generation is not configured for this data source', reason: 'Select GLB or switch to Demo to generate safe simulated requests.' });
+  }
 
   try {
     const ip = await getGlbGatewayIp();
@@ -809,14 +1437,17 @@ app.post('/api/generate', async (req, res) => {
       succeeded: 0,
       failed: 0,
       last_status: null,
+      results: [],
       started_at: new Date().toISOString(),
       finished_at: null,
+      target: 'glb-gateway',
     };
     runRequestJob(requestJob, ip).catch((error) => {
       requestJob.running = false;
       requestJob.error = error.message;
       requestJob.finished_at = new Date().toISOString();
     });
+    emitEvent('generation.started', { job: requestJob });
     return res.status(202).json({ job: requestJob });
   } catch (error) {
     return res.status(503).json({ error: `Unable to find the GLB gateway: ${error.message}` });
@@ -828,10 +1459,233 @@ app.post('/api/generate/cancel', (_req, res) => {
   res.json({ job: requestJob });
 });
 
+// ---------------------------------------------------------------------------
+// Sustained llm-d load generator
+// ---------------------------------------------------------------------------
+
+app.get('/api/load/status', async (_req, res) => {
+  if (dataSource !== 'vcr') {
+    return res.json({ available: false, target: 'llmd-load', reason: 'Select the llm-d/EPP source to run sustained provider load.', job: loadJob });
+  }
+  const readiness = await getVcrReadiness();
+  res.json({
+    available: readiness.available,
+    target: 'llmd-load',
+    reason: readiness.available ? null : `llm-d consumer gateway unavailable: ${readiness.reason}`,
+    job: loadJob,
+  });
+});
+
+app.post('/api/load', async (req, res) => {
+  if (dataSource !== 'vcr') {
+    return res.status(409).json({ error: 'Sustained load is available only for the llm-d/EPP source.' });
+  }
+  if (loadJob?.running) {
+    return res.status(409).json({ error: 'An llm-d load job is already running', job: loadJob });
+  }
+  const duration = Math.min(300, Math.max(5, Number.parseInt(req.body?.duration_seconds ?? 30, 10) || 30));
+  const rate = Math.min(50, Math.max(0.1, Number(req.body?.rate ?? 5) || 5));
+  const concurrency = Math.min(24, Math.max(1, Number.parseInt(req.body?.concurrency ?? 6, 10) || 6));
+  const targetPool = req.body?.target_pool === 'pool-b' ? 'pool-b' : 'pool-a';
+  const maxTokens = Math.min(256, Math.max(1, Number.parseInt(req.body?.max_tokens ?? 32, 10) || 32));
+  const prompt = typeof req.body?.prompt === 'string' && req.body.prompt.trim()
+    ? req.body.prompt.trim().slice(0, 500)
+    : 'dashboard sustained load';
+  try {
+    const ip = await getVcrGatewayIp(targetPool);
+    loadJob = {
+      id: `llmd-load-${Date.now()}`,
+      running: true,
+      target: 'llmd-load',
+      target_pool: targetPool,
+      duration_seconds: duration,
+      rate_per_second: rate,
+      concurrency,
+      max_tokens: maxTokens,
+      prompt,
+      gateway_ip: ip,
+      gateway_port: VCR_GATEWAY_PORT,
+      completed: 0,
+      succeeded: 0,
+      failed: 0,
+      last_status: null,
+      last_provider: null,
+      providers: {},
+      started_at: new Date().toISOString(),
+      finished_at: null,
+      stopped_reason: null,
+    };
+    runVcrLoadJob(loadJob, ip).catch(error => {
+      loadJob.running = false;
+      loadJob.error = error.message;
+      loadJob.finished_at = new Date().toISOString();
+      emitEvent('load.failed', { job: loadJob });
+    });
+    emitEvent('load.started', { job: loadJob });
+    return res.status(202).json({ job: loadJob });
+  } catch (error) {
+    return res.status(503).json({ error: `Unable to find the llm-d consumer gateway for ${targetPool}: ${error.message}` });
+  }
+});
+
+app.post('/api/load/cancel', (_req, res) => {
+  if (loadJob?.running) loadJob.cancelled = true;
+  res.json({ job: loadJob });
+});
+
+// ---------------------------------------------------------------------------
+// Versioned request-centric contract
+// ---------------------------------------------------------------------------
+
+app.get('/api/v1/capabilities', async (_req, res) => {
+  const jaegerReachable = await isJaegerReachable();
+  const vcr = await loadLiveVcrState();
+  const simulated = ALLOW_SIMULATION && (currentMode === 'demo' || (currentMode === 'auto' && !jaegerReachable));
+  const live = !simulated;
+  const glbReady = !simulated && dataSource === 'glb' ? await getGlbReadiness() : null;
+  const vcrReady = !simulated && dataSource === 'vcr' ? await getVcrReadiness() : null;
+  const generatorAvailable = simulated
+    || (dataSource === 'glb' && glbReady?.available)
+    || (dataSource === 'vcr' && vcrReady?.available);
+  const generatorSource = simulated
+    ? 'synthetic_generator'
+    : dataSource === 'glb'
+      ? 'glb_gateway'
+      : dataSource === 'vcr' ? 'llmd_gateway' : 'none';
+  const generatorReason = simulated
+    ? 'Safe local simulation; no request leaves the browser host.'
+    : dataSource === 'glb'
+      ? glbReady?.available ? null : `GLB gateway unavailable: ${glbReady?.reason || 'target not found'}`
+      : dataSource === 'combined'
+        ? 'Combined-site live evidence is available, but no request generator is configured.'
+        : vcrReady?.available ? null : `llm-d consumer gateway unavailable: ${vcrReady?.reason || 'target not found'}`;
+  const state = (available, source, reason = null) => ({ state: available ? 'available' : 'unavailable', source, ...(reason ? { reason } : {}) });
+  res.json({
+    version: 'v1',
+    environment: {
+      id: dataSource === 'vcr' ? 'grid-llmd-pool-metrics' : dataSource === 'combined' ? 'grid-combined-site' : 'grid-glb',
+      display_name: dataSource === 'vcr' ? 'Grid llm-d pool metrics' : dataSource === 'combined' ? 'Grid combined site' : 'Grid GLB',
+      profile: dataSource === 'vcr' ? 'llmd_pool' : dataSource === 'combined' ? 'combined_site' : 'glb',
+      mode: simulated ? 'demo' : live && jaegerReachable ? 'live' : 'partial',
+      detected_at: new Date().toISOString(),
+    },
+    capabilities: {
+      can_generate_requests: state(Boolean(generatorAvailable), generatorSource, generatorReason),
+      can_generate_load: state(Boolean(!simulated && dataSource === 'vcr' && vcrReady?.available), 'llmd_load_generator', dataSource === 'vcr' ? (vcrReady?.available ? null : generatorReason) : 'Sustained load is available only for the llm-d/EPP source.'),
+      can_read_traces: state(jaegerReachable, 'jaeger', 'Jaeger is unreachable'),
+      can_read_epp_metrics: state(Boolean(vcr), 'epp_prometheus', 'No live llm-d EPP state discovered'),
+      can_read_overlay: state(Boolean(loadOverlayFromFile()) || Boolean(vcr), 'grid_overlay', 'No overlay source discovered'),
+      can_replay_requests: state(simulated, 'synthetic_replay', simulated ? null : 'Only synthetic replay is enabled in this build.'),
+      can_show_route_attribution: state(jaegerReachable || simulated, 'otel_span'),
+    },
+    semantics: { missing: '—', stale_metrics_are_not_zero: true, request_generation_is_always_visible: true },
+  });
+});
+
+app.get('/api/v1/requests', async (req, res) => {
+  const requestedLimit = Number.parseInt(req.query.limit || '50', 10);
+  const limit = Math.min(100, Math.max(1, Number.isFinite(requestedLimit) ? requestedLimit : 50));
+  const all = await normalizedRequestDataset();
+  const jaegerReachable = await isJaegerReachable();
+  const from = req.query.from ? Date.parse(req.query.from) : -Infinity;
+  const to = req.query.to ? Date.parse(req.query.to) : Infinity;
+  const provider = typeof req.query.provider === 'string' ? req.query.provider : null;
+  const filtered = all.filter(request => {
+    const timestamp = Date.parse(request.started_at || '') || 0;
+    return timestamp >= from && timestamp <= to && (!provider || request.provider.name === provider || request.provider.cluster === provider);
+  });
+  const filterHash = JSON.stringify({ from: req.query.from || null, to: req.query.to || null, provider });
+  const decoded = decodeCursor(req.query.cursor);
+  if (!decoded) return res.status(400).json({ error: 'invalid cursor' });
+  const offset = decoded.offset || 0;
+  const items = filtered.slice(offset, offset + limit);
+  const nextOffset = offset + items.length;
+  res.json({
+    version: 'v1', items, next_cursor: nextOffset < filtered.length ? encodeCursor(nextOffset, filterHash) : null,
+    has_more: nextOffset < filtered.length,
+    window: { from: req.query.from || null, to: req.query.to || null },
+    partial: currentMode === 'demo' || !jaegerReachable,
+    warnings: currentMode === 'demo' ? ['SIMULATED: request summaries are generated by the selected demo scenario.'] : [],
+    page: { limit, offset, total_in_sample: filtered.length },
+  });
+});
+
+app.get('/api/v1/requests/:requestId', async (req, res) => {
+  const all = await normalizedRequestDataset();
+  const request = all.find(item => item.request_id === req.params.requestId || item.trace_id === req.params.requestId);
+  if (!request) return res.status(404).json({ error: 'request not found' });
+  const simulated = effectiveDemoMode(await isJaegerReachable());
+  res.json({ version: 'v1', request, replay: { allowed: simulated, tier: 'synthetic_only', reason: simulated ? null : 'Original request content is not replayable.' } });
+});
+
+app.get('/api/v1/requests/:requestId/trace', async (req, res) => {
+  const all = await normalizedRequestDataset();
+  const request = all.find(item => item.request_id === req.params.requestId || item.trace_id === req.params.requestId);
+  if (!request) return res.status(404).json({ error: 'request not found' });
+  if (request.trace_id && !request.trace_id.startsWith('000000000000000000000000000000')) {
+    try {
+      const result = await jaegerFetch(`/api/traces/${request.trace_id}`);
+      if (result.status === 200 && result.body.data?.[0]) {
+        const parsed = parseJaegerTrace(result.body.data[0]);
+        return res.json({ version: 'v1', request_id: request.request_id, trace: parsed, quality: 'exact' });
+      }
+    } catch { /* fall through to the normalized summary */ }
+  }
+  res.json({ version: 'v1', request_id: request.request_id, trace: { trace_id: request.trace_id, spans: request.spans || [], span_count: request.span_count || 0 }, quality: request.trace_quality || 'simulated' });
+});
+
+app.get('/api/v1/replay/window', async (req, res) => {
+  const all = await normalizedRequestDataset();
+  const from = req.query.from ? Date.parse(req.query.from) : -Infinity;
+  const to = req.query.to ? Date.parse(req.query.to) : Infinity;
+  const requests = all.filter(request => {
+    const at = Date.parse(request.started_at || '') || 0;
+    return at >= from && at <= to;
+  });
+  const events = requests.map((request, index) => ({
+    id: `request-${request.request_id}`,
+    type: request.routing?.failover ? 'route.changed' : index === 0 ? 'baseline' : 'request.observed',
+    at: request.started_at,
+    label: request.routing?.failover ? `Failover to ${request.provider?.name || 'provider'}` : `${request.status || 'unknown'} request observed`,
+    quality: request.trace_quality || 'simulated',
+    request_id: request.request_id,
+  }));
+  res.json({ version: 'v1', cursor_time: req.query.cursor || (requests[0]?.started_at || null), window: { from: req.query.from || null, to: req.query.to || null }, requests, events, reconstruction: { mode: 'visual', network_traffic: false, quality: currentMode === 'demo' ? 'simulated' : 'sampled', note: 'This view reconstructs observed evidence; it does not replay network traffic.' } });
+});
+
+app.get('/api/v1/events/stream', (req, res) => {
+  res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+  res.flushHeaders();
+  res.write(`event: ready\ndata: ${JSON.stringify({ type: 'ready', time: new Date().toISOString() })}\n\n`);
+  eventClients.add(res);
+  req.on('close', () => eventClients.delete(res));
+});
+
+app.post('/api/v1/replays', async (req, res) => {
+  const simulated = effectiveDemoMode(await isJaegerReachable());
+  if (!simulated) return res.status(403).json({ error: 'Replay is disabled', reason: 'Only synthetic demo replay is enabled.' });
+  const requestId = req.body?.request_id;
+  const all = await normalizedRequestDataset();
+  const original = all.find(item => item.request_id === requestId);
+  if (!original) return res.status(404).json({ error: 'request not found' });
+  const id = `replay-${Date.now().toString(36)}`;
+  const replay = { id, request_id: requestId, status: 'queued', tier: 'synthetic_only', created_at: new Date().toISOString(), actor: 'dashboard' };
+  replayJobs.set(id, replay);
+  emitEvent('replay.progress', { replay });
+  setTimeout(() => { replay.status = 'completed'; replay.completed_at = new Date().toISOString(); emitEvent('replay.completed', { replay }); }, 250);
+  res.status(202).json({ replay });
+});
+
+app.get('/api/v1/replays/:replayId', (req, res) => {
+  const replay = replayJobs.get(req.params.replayId);
+  if (!replay) return res.status(404).json({ error: 'replay not found' });
+  res.json({ replay });
+});
+
 app.get('/api/attribution', async (_req, res) => {
   const jaegerUp = await isJaegerReachable();
   if (!jaegerUp) return res.json({ available: false, sample_size: 0, providers: {} });
-  const allTraces = await fetchLiveTracesAllServices(100);
+  const allTraces = filterRecentTraces(await fetchLiveTracesAllServices(100));
   const praxisTraces = allTraces.filter(trace => trace.source === 'praxis' && trace.demo_run_id);
   const currentRunId = praxisTraces.map(trace => trace.demo_run_id).sort().at(-1) || null;
   const traces = currentRunId
@@ -886,14 +1740,24 @@ async function loadLiveVcrState() {
         kubectlRaw(context, `/api/v1/namespaces/${VCR_NAMESPACE}/services/http:llmd-epp-metrics:9090/proxy/metrics`),
         kubectlConfigMap(context),
       ]);
-      const overlay = JSON.parse(configMap.data['routing-overlay.json']);
+      const overlayData = configMap.data['routing-overlay.json']
+        || configMap.data['routing-config.json'];
+      if (!overlayData) {
+        throw new Error(`overlay ConfigMap ${VCR_OVERLAY_CONFIGMAP} has no routing overlay data`);
+      }
+      const overlay = JSON.parse(overlayData);
       pools.push({ context, metrics, overlay });
     }
 
     // Use the first consumer's overlay as the dashboard perspective. It
     // contains both local and remote candidates and their current scores.
     const primary = pools[0];
-    const candidates = primary.overlay?.overlay?.candidates || [];
+    // Current Grid overlay ConfigMaps use a top-level candidates array;
+    // earlier experimental snapshots nested it under overlay. Accept both
+    // schemas while preserving the live values exactly as published.
+    const candidates = primary.overlay?.candidates
+      || primary.overlay?.overlay?.candidates
+      || [];
     const metricsByPool = new Map();
     for (const { metrics } of pools) {
       const queue = metrics.match(/inference_pool_average_queue_size\{name="([^"]+)"\}\s+([\d.eE+-]+)/);
@@ -944,13 +1808,19 @@ async function loadLiveVcrState() {
       source: 'vcr-epp-live',
       scoring_strategy: 'queueDepth',
       providers,
-      overlay_revision: primary.overlay?.revision?.value || null,
-      generated_at: primary.overlay?.overlay?.generated_at || null,
+      overlay_revision: primary.overlay?.revision?.value
+        || primary.overlay?.revision
+        || primary.overlay?.overlay?.revision?.value
+        || null,
+      generated_at: primary.overlay?.generated_at
+        || primary.overlay?.overlay?.generated_at
+        || null,
       contexts: VCR_CONTEXTS,
     };
     liveVcrCache = { expires: Date.now() + 2000, value };
     return value;
   } catch (error) {
+    console.error(`Live llm-d/EPP state unavailable: ${error.message}`);
     liveVcrCache = { expires: Date.now() + 2000, value: null };
     return null;
   }
@@ -1095,7 +1965,7 @@ function vcrTimelineFromEvidence(evidence) {
 
 app.get('/api/causal', async (_req, res) => {
   const jaegerUp = await isJaegerReachable();
-  const effectiveMode = currentMode === 'auto' ? (jaegerUp ? 'live' : 'demo') : currentMode;
+  const effectiveMode = currentMode === 'auto' ? (jaegerUp ? 'live' : ALLOW_SIMULATION ? 'demo' : 'unavailable') : currentMode;
 
   let providers = [];
   let strategy = 'unknown';
@@ -1132,7 +2002,7 @@ app.get('/api/causal', async (_req, res) => {
         } : null;
         timeline = buildTimelineFromTraces(await fetchLiveTracesAllServices(50));
       }
-    } else {
+    } else if (effectiveMode === 'demo' && ALLOW_SIMULATION) {
       const scenario = DEMO_SCENARIOS[demoScenario] || DEMO_SCENARIOS.baseline;
       const scored = scoreAndRankPools(scenario.pools);
       providers = scored.map(p => ({ ...p, ...classifyProvider(p) }));
@@ -1144,6 +2014,10 @@ app.get('/api/causal', async (_req, res) => {
       };
       timeline = buildDemoTimeline();
     }
+  }
+
+  if (effectiveMode === 'unavailable' && !providers.length) {
+    return res.json({ mode: 'unavailable', warning: 'No live metrics or trace source is available; simulation is disabled.', steps: { traffic: { state: 'unavailable' }, metrics: { state: 'unavailable' }, score: { state: 'unavailable' }, route: { state: 'unavailable' }, attribution: { state: 'unavailable' } } });
   }
 
   const hasRouteChange = timeline.some(e => e.type === 'route_change');

@@ -76,6 +76,13 @@ the default used here.
 - Rust stable 1.96+ and the repository-pinned nightly toolchain
 - Capacity for five single-node Kind clusters
 
+Install Rust if `cargo` and `rustc` are not already available:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+```
+
 ## Registry Images
 
 ```bash
@@ -87,13 +94,17 @@ export GRID_XTASK_IMAGE_PULL_POLICY=IfNotPresent
 
 ## Quick Start
 
+Run these commands from this demo directory:
+
 ```bash
+cd components/demos/grid-glb-demo
 ./run.sh --quick --teardown
 ```
 
 ## Full Mode
 
 ```bash
+cd components/demos/grid-glb-demo
 ./run.sh --full --teardown
 ```
 
@@ -102,12 +113,24 @@ recovery, edge withdrawal/recovery, sequential Grid operator restarts, and a
 configured request soak. The provider transition is an availability/failover
 exercise, not an EPP pressure-scoring exercise.
 
+For the live OTel/Jaeger presentation, do not use the `--teardown` examples
+above until observation is complete. Use the repository
+[OTel + Jaeger runbook](../../../runbook.md), which starts the UI and tracing
+infrastructure, deploys the OTel-enabled gateway image, and keeps the five
+Kind clusters available for inspection. The GLB UI shows observed multi-hop
+request paths and trace evidence; it does not show EPP pressure metrics.
+
+The demo commands are runtime workloads. Automated Cargo, npm, and Playwright
+test suites are optional development checks and are not part of the live
+presentation workflow.
+
 ## Teardown and Keep-on-Failure
 
 `--teardown` deletes all Kind clusters after the run, including on failure.
 Add `--keep-on-failure` to retain clusters when a proof fails:
 
 ```bash
+cd components/demos/grid-glb-demo
 ./run.sh --quick --teardown --keep-on-failure
 ```
 

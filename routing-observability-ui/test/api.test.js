@@ -12,6 +12,7 @@ async function api(path, opts) {
 before(async () => {
   process.env.PORT = '0';
   process.env.JAEGER_URL = 'http://localhost:19999';
+  process.env.ALLOW_SIMULATION = 'true';
   const mod = await import('../server.js');
   server = mod.server;
   const addr = server.address();
@@ -172,8 +173,8 @@ describe('privacy', () => {
   });
 });
 
-describe('Jaeger unavailable fallback', () => {
-  it('falls back to demo when Jaeger is unreachable', async () => {
+describe('explicit simulation fallback', () => {
+  it('uses explicit simulation when Jaeger is unreachable', async () => {
     await api('/mode', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -181,10 +182,10 @@ describe('Jaeger unavailable fallback', () => {
     });
     const { body } = await api('/status');
     assert.equal(body.jaeger_reachable, false, 'Jaeger at port 19999 should be unreachable');
-    assert.equal(body.mode, 'demo', 'auto mode falls back to demo when Jaeger is down');
+    assert.equal(body.mode, 'demo', 'auto mode uses explicit simulation when enabled');
   });
 
-  it('pools endpoint returns demo data when Jaeger is unreachable', async () => {
+  it('pools endpoint remains unavailable in explicit live mode without Jaeger', async () => {
     await api('/mode', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -195,7 +196,7 @@ describe('Jaeger unavailable fallback', () => {
     assert.ok(Array.isArray(body.pools), 'still returns pool data');
   });
 
-  it('traces endpoint returns demo data when Jaeger is unreachable in live mode', async () => {
+  it('traces endpoint remains unavailable in explicit live mode without Jaeger', async () => {
     await api('/mode', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -621,5 +622,75 @@ describe('no sensitive data leakage', () => {
     assert.ok(!json.includes('Bearer'), 'no auth tokens');
     assert.ok(!json.includes('sk-'), 'no API keys');
     assert.ok(!json.includes('password'), 'no passwords');
+  });
+});
+
+describe('v2 request-centric API', () => {
+  it('exposes a versioned capability contract', async () => {
+    const { body } = await api('/v1/capabilities');
+    assert.equal(body.version, 'v1');
+    assert.ok(body.environment.profile);
+    assert.equal(body.capabilities.can_generate_requests.state, 'available');
+    assert.equal(body.semantics.stale_metrics_are_not_zero, true);
+  });
+
+  it('returns cursor-paginated normalized requests', async () => {
+    await api('/mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'demo' }) });
+    await api('/scenario/pressure', { method: 'POST' });
+    const { body } = await api('/v1/requests?limit=1');
+    assert.equal(body.version, 'v1');
+    assert.equal(body.items.length, 1);
+    assert.ok(body.items[0].request_id);
+    assert.ok(body.items[0].provider);
+    assert.ok(body.items[0].routing);
+    assert.ok(body.items[0].experience.reasons.length > 0);
+  });
+
+  it('returns request detail with replay safety boundary', async () => {
+    const list = await api('/v1/requests?limit=1');
+    const { body } = await api(`/v1/requests/${list.body.items[0].request_id}`);
+    assert.equal(body.version, 'v1');
+    assert.equal(body.replay.allowed, true);
+    assert.equal(body.replay.tier, 'synthetic_only');
+    assert.ok(body.request.provenance);
+  });
+
+  it('accepts only synthetic replay in demo mode', async () => {
+    const list = await api('/v1/requests?limit=1');
+    const { status, body } = await api('/v1/replays', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request_id: list.body.items[0].request_id }) });
+    assert.equal(status, 202);
+    assert.equal(body.replay.tier, 'synthetic_only');
+  });
+
+  it('lists presenter scripts and exposes selection-time signals', async () => {
+    const scripts = await api('/v1/demo/scripts');
+    assert.ok(scripts.body.scripts.some(script => script.id === 'presenter'));
+    const list = await api('/v1/requests?limit=1');
+    assert.ok(list.body.items[0].selection_time_metrics.queue_depth);
+    assert.equal(list.body.items[0].selection_time_metrics.queue_depth.quality, 'simulated');
+    assert.ok(list.body.items[0].experience.components.confidence);
+  });
+
+  it('runs and stops a presenter script in demo mode', async () => {
+    const started = await api('/v1/demo/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ script_id: 'failure' }) });
+    assert.equal(started.status, 202);
+    assert.equal(started.body.run.script_id, 'failure');
+    const status = await api('/v1/demo/status');
+    assert.ok(status.body.run);
+    await api('/v1/demo/stop', { method: 'POST' });
+  });
+
+  it('supports lazy trace detail', async () => {
+    const list = await api('/v1/requests?limit=1');
+    const detail = await api(`/v1/requests/${list.body.items[0].request_id}/trace`);
+    assert.equal(detail.body.version, 'v1');
+    assert.ok(detail.body.trace);
+  });
+
+  it('returns a safe visual replay window', async () => {
+    const replay = await api('/v1/replay/window');
+    assert.equal(replay.body.version, 'v1');
+    assert.equal(replay.body.reconstruction.network_traffic, false);
+    assert.ok(Array.isArray(replay.body.events));
   });
 });

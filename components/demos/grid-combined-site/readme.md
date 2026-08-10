@@ -68,6 +68,13 @@ ahead of dynamic score and is the default used here.
 - Rust stable 1.96+
 - Capacity for three single-node Kind clusters
 
+Install Rust if `cargo` and `rustc` are not already available:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+```
+
 ## Registry Images
 
 ```bash
@@ -79,13 +86,17 @@ export GRID_XTASK_IMAGE_PULL_POLICY=IfNotPresent
 
 ## Quick Start
 
+Run these commands from this demo directory:
+
 ```bash
+cd components/demos/grid-combined-site
 ./run.sh --quick --teardown
 ```
 
 ## Full Mode
 
 ```bash
+cd components/demos/grid-combined-site
 ./run.sh --full --teardown
 ```
 
@@ -95,12 +106,20 @@ during withdrawal, sequential Grid operator restart recovery, and sustained
 inference after recovery. It does not use EPP pressure metrics to drive this
 transition.
 
+For an observation run, keep the clusters running until the routing lifecycle
+has been viewed and the evidence has been collected. The workload demonstrates
+local preference, availability failover, and recovery; it is not an llm-d/EPP
+pressure-metrics demo. Automated Cargo, npm, and Playwright test suites are
+optional development checks and are not part of the live presentation
+workflow.
+
 ## Teardown and Keep-on-Failure
 
 `--teardown` deletes all Kind clusters after the run, including on failure.
 Add `--keep-on-failure` to retain clusters when a proof fails:
 
 ```bash
+cd components/demos/grid-combined-site
 ./run.sh --quick --teardown --keep-on-failure
 ```
 

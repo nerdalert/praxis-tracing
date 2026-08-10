@@ -11,7 +11,7 @@
 #   ./scripts/run-tracing.sh --teardown    # stop everything
 #
 # Environment:
-#   UI_PORT            UI server port (default: 8080)
+#   UI_PORT            UI server port (default: 3001)
 #   JAEGER_URL         Jaeger endpoint (default: http://localhost:16686)
 #   OTEL_ENDPOINT      OTel collector endpoint (default: http://localhost:4318)
 set -euo pipefail
@@ -24,8 +24,15 @@ POC_DIR="${GRID_DIR}/tracing-poc"
 UI_DIR="${ROOT_DIR}/routing-observability-ui"
 COMPOSE_FILE="${POC_DIR}/docker/docker-compose.yaml"
 
-UI_PORT="${UI_PORT:-8080}"
+UI_PORT="${UI_PORT:-3001}"
 JAEGER_URL="${JAEGER_URL:-http://localhost:16686}"
+JAEGER_UI_URL="${JAEGER_UI_URL:-${JAEGER_URL}}"
+VCR_LIVE="${VCR_LIVE:-false}"
+VCR_KUBECTL_CONTEXT_A="${VCR_KUBECTL_CONTEXT_A:-}"
+VCR_KUBECTL_CONTEXT_B="${VCR_KUBECTL_CONTEXT_B:-}"
+VCR_NAMESPACE="${VCR_NAMESPACE:-grid-system}"
+VCR_OVERLAY_CONFIGMAP="${VCR_OVERLAY_CONFIGMAP:-}"
+VCR_QUEUE_CAPACITY="${VCR_QUEUE_CAPACITY:-4}"
 
 POC_MODE=""
 TEARDOWN=false
@@ -91,7 +98,26 @@ fi
 # Start UI
 echo "Starting Observability UI on port ${UI_PORT}..."
 cd "${UI_DIR}"
-PORT="${UI_PORT}" JAEGER_URL="${JAEGER_URL}" node server.js &
+PORT="${UI_PORT}" \
+JAEGER_URL="${JAEGER_URL}" \
+JAEGER_UI_URL="${JAEGER_UI_URL}" \
+VCR_LIVE="${VCR_LIVE}" \
+VCR_KUBECTL_CONTEXT_A="${VCR_KUBECTL_CONTEXT_A}" \
+VCR_KUBECTL_CONTEXT_B="${VCR_KUBECTL_CONTEXT_B}" \
+VCR_NAMESPACE="${VCR_NAMESPACE}" \
+VCR_OVERLAY_CONFIGMAP="${VCR_OVERLAY_CONFIGMAP}" \
+VCR_QUEUE_CAPACITY="${VCR_QUEUE_CAPACITY}" \
+nohup setsid env \
+  PORT="${UI_PORT}" \
+  JAEGER_URL="${JAEGER_URL}" \
+  JAEGER_UI_URL="${JAEGER_UI_URL}" \
+  VCR_LIVE="${VCR_LIVE}" \
+  VCR_KUBECTL_CONTEXT_A="${VCR_KUBECTL_CONTEXT_A}" \
+  VCR_KUBECTL_CONTEXT_B="${VCR_KUBECTL_CONTEXT_B}" \
+  VCR_NAMESPACE="${VCR_NAMESPACE}" \
+  VCR_OVERLAY_CONFIGMAP="${VCR_OVERLAY_CONFIGMAP}" \
+  VCR_QUEUE_CAPACITY="${VCR_QUEUE_CAPACITY}" \
+  node server.js > "${ROOT_DIR}/.ui.log" 2>&1 &
 UI_PID=$!
 echo "${UI_PID}" > "${ROOT_DIR}/.ui.pid"
 

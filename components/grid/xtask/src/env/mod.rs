@@ -181,8 +181,8 @@ const DEFAULT_CONFIG_PATH: &str = "tests/env/config.toml";
 ///
 /// The parent of the Forge config file is the demo root. All demo-relative
 /// assets — configs, resources, policies, fixtures — resolve from this
-/// directory so that both internal (`tests/e2e/topologies/…`) and external
-/// (`praxis-demos/demos/…`) asset trees are consumed faithfully.
+/// directory so that both internal and externally supplied demo asset trees
+/// are consumed faithfully.
 pub(crate) fn demo_root(forge_config: &Path) -> PathBuf {
     forge_config
         .parent()

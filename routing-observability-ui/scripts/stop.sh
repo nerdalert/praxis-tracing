@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PORT="${PORT:-8080}"
+PORT="${PORT:-3001}"
 
 pid=$(lsof -ti :"$PORT" 2>/dev/null || true)
 if [ -n "$pid" ]; then

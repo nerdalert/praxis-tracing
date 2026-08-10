@@ -7,7 +7,7 @@ test.describe('Visual validation', () => {
     const { spawn } = await import('child_process');
     const server = spawn('node', ['server.js'], {
       cwd: new URL('..', import.meta.url).pathname,
-      env: { ...process.env, PORT: '18083', JAEGER_URL: 'http://localhost:19999' },
+      env: { ...process.env, PORT: '18083', JAEGER_URL: 'http://localhost:19999', ALLOW_SIMULATION: 'true' },
       stdio: 'pipe',
     });
     await new Promise(resolve => setTimeout(resolve, 2000));
@@ -25,139 +25,38 @@ test.describe('Visual validation', () => {
     await expect(page.locator('h1')).toHaveText('Grid Routing Observability');
   });
 
-  test('topology section is nonblank', async ({ page }) => {
+  test('request detail contains the selected request flow', async ({ page }) => {
     await page.goto(BASE_URL);
     await page.waitForTimeout(3500);
-    const topology = page.locator('#topology');
-    await expect(topology).not.toBeEmpty();
-    const nodes = topology.locator('.topo-node');
+    await page.locator('.request-open').first().click();
+    await expect(page.locator('#request-detail')).toBeVisible();
+    const nodes = page.locator('.request-flow-node');
     const count = await nodes.count();
     expect(count).toBeGreaterThan(0);
   });
 
-  test('provider cards render', async ({ page }) => {
-    await page.goto(BASE_URL);
-    await page.waitForTimeout(3500);
-    const cards = page.locator('.pool-card');
-    const count = await cards.count();
-    expect(count).toBeGreaterThan(0);
-  });
 
-  test('provider cards stack vertically for additional nodes', async ({ page }) => {
-    await page.goto(BASE_URL);
-    await page.waitForTimeout(3500);
-    const cards = page.locator('.pool-card');
-    const count = await cards.count();
-    expect(count).toBeGreaterThanOrEqual(2);
-    const first = await cards.nth(0).boundingBox();
-    const second = await cards.nth(1).boundingBox();
-    expect(first).not.toBeNull();
-    expect(second).not.toBeNull();
-    expect(Math.abs(first.x - second.x)).toBeLessThan(2);
-    expect(second.y).toBeGreaterThan(first.y + first.height - 2);
-  });
-
-  test('routing state is populated when provider data is available', async ({ page }) => {
-    await page.goto(BASE_URL);
-    await page.waitForTimeout(3500);
-    const values = await page.locator('.routing-value').allTextContents();
-    expect(values.some(value => value.trim() !== '—')).toBe(true);
-  });
-
-  test('pressure badges have text labels', async ({ page }) => {
-    await page.goto(BASE_URL);
-    await page.waitForTimeout(3500);
-    const badges = page.locator('.pressure-badge');
-    const count = await badges.count();
-    for (let i = 0; i < count; i++) {
-      const text = await badges.nth(i).textContent();
-      expect(text.trim().length).toBeGreaterThan(0);
-      expect(['NORMAL', 'ELEVATED', 'HIGH', 'CRITICAL', 'UNKNOWN']).toContain(text.trim());
-    }
-  });
-
-  test('mode badge is visible', async ({ page }) => {
+  test('evidence status is visible without mode jargon', async ({ page }) => {
     await page.goto(BASE_URL);
     await page.waitForTimeout(1000);
-    const badge = page.locator('#mode-badge');
+    const badge = page.locator('#evidence-badge');
     await expect(badge).toBeVisible();
     const text = await badge.textContent();
     expect(text.length).toBeGreaterThan(0);
   });
 
-  test('score values do not show as zero for missing data', async ({ page }) => {
+  test('request detail labels boundary and traced flow nodes', async ({ page }) => {
     await page.goto(BASE_URL);
     await page.waitForTimeout(3500);
-    const scoreValues = page.locator('.pool-score-value');
-    const count = await scoreValues.count();
-    for (let i = 0; i < count; i++) {
-      const text = await scoreValues.nth(i).textContent();
-      if (text.trim() === '0') {
-        const card = scoreValues.nth(i).locator('..').locator('..');
-        const pressure = await card.locator('.pressure-badge').textContent();
-        expect(pressure.trim()).not.toBe('UNKNOWN');
-      }
-    }
-  });
-
-  test('topology shows functional/traced/eligible labels', async ({ page }) => {
-    await page.goto(BASE_URL);
-    await page.waitForTimeout(3500);
-    const statuses = page.locator('.topo-status');
+    await page.locator('.request-open').first().click();
+    await expect(page.locator('#request-detail')).toBeVisible();
+    await expect(page.locator('.request-flow-node').first()).toBeVisible({ timeout: 5000 });
+    const statuses = page.locator('.request-flow-node small');
     const count = await statuses.count();
     expect(count).toBeGreaterThan(0);
     for (let i = 0; i < count; i++) {
       const text = await statuses.nth(i).textContent();
-      expect(['traced', 'functional', 'eligible']).toContain(text.trim());
-    }
-  });
-
-  test('timeline section renders events', async ({ page }) => {
-    await page.goto(BASE_URL);
-    await page.waitForTimeout(3500);
-    const events = page.locator('.timeline-event');
-    const count = await events.count();
-    expect(count).toBeGreaterThan(0);
-  });
-
-  test('provider card click opens inspector', async ({ page }) => {
-    await page.goto(BASE_URL);
-    await page.waitForTimeout(3500);
-    const firstCard = page.locator('.pool-card').first();
-    await firstCard.click();
-    const inspector = page.locator('#provider-inspector');
-    await expect(inspector).toBeVisible();
-    const content = page.locator('#inspector-content');
-    await expect(content).not.toBeEmpty();
-  });
-
-  test('inspector close button works', async ({ page }) => {
-    await page.goto(BASE_URL);
-    await page.waitForTimeout(3500);
-    await page.locator('.pool-card').first().click();
-    await expect(page.locator('#provider-inspector')).toBeVisible();
-    await page.locator('#provider-inspector .close-btn').click();
-    await expect(page.locator('#provider-inspector')).toBeHidden();
-  });
-
-  test('traces table has rows', async ({ page }) => {
-    await page.goto(BASE_URL);
-    await page.waitForTimeout(3500);
-    const rows = page.locator('.trace-row');
-    const count = await rows.count();
-    expect(count).toBeGreaterThanOrEqual(0);
-  });
-
-  test('no layout shifts from dynamic values', async ({ page }) => {
-    await page.goto(BASE_URL);
-    await page.waitForTimeout(3500);
-    const card = page.locator('.pool-card').first();
-    const box1 = await card.boundingBox();
-    await page.waitForTimeout(4000);
-    const box2 = await card.boundingBox();
-    if (box1 && box2) {
-      expect(Math.abs(box1.width - box2.width)).toBeLessThan(5);
-      expect(Math.abs(box1.height - box2.height)).toBeLessThan(5);
+      expect(['traced', 'boundary']).toContain(text.trim());
     }
   });
 
@@ -165,39 +64,8 @@ test.describe('Visual validation', () => {
     await page.setViewportSize({ width: 375, height: 812 });
     await page.goto(BASE_URL);
     await page.waitForTimeout(3500);
-    const cards = page.locator('.pool-card');
-    const count = await cards.count();
-    expect(count).toBeGreaterThan(0);
-    const card = cards.first();
-    const box = await card.boundingBox();
-    if (box) {
-      expect(box.width).toBeLessThanOrEqual(375);
-    }
-  });
-
-  test('causal chain section renders', async ({ page }) => {
-    await page.goto(BASE_URL);
-    await page.waitForTimeout(3500);
-    const chain = page.locator('#causal-chain');
-    await expect(chain).toBeVisible();
-    const steps = chain.locator('.causal-step');
-    const count = await steps.count();
-    expect(count).toBe(5);
-  });
-
-  test('causal chain shows all step headers', async ({ page }) => {
-    await page.goto(BASE_URL);
-    await page.waitForTimeout(3500);
-    const headers = page.locator('.causal-step-header');
-    const texts = [];
-    for (let i = 0; i < await headers.count(); i++) {
-      texts.push(await headers.nth(i).textContent());
-    }
-    expect(texts).toContain('Traffic');
-    expect(texts).toContain('Metrics');
-    expect(texts.some(t => t.startsWith('Score'))).toBe(true);
-    expect(texts).toContain('Route');
-    expect(texts).toContain('Attribution');
+    await expect(page.locator('#request-explorer')).toBeVisible();
+    expect(await page.locator('.request-table').count()).toBe(1);
   });
 
   test('source selector buttons are visible', async ({ page }) => {
@@ -218,5 +86,125 @@ test.describe('Visual validation', () => {
     await expect(badge).toBeVisible();
     const text = await badge.textContent();
     expect(text.trim()).toBe('GLB');
+  });
+
+  test('request explorer is the common primary view', async ({ page }) => {
+    await page.goto(BASE_URL);
+    await page.waitForTimeout(3500);
+    await expect(page.locator('#request-explorer')).toBeVisible();
+    await expect(page.locator('#request-table')).toBeVisible();
+    await expect(page.locator('#request-summary-strip')).toContainText('requests in window');
+    await expect(page.locator('#generator-start')).toBeVisible();
+    await expect(page.locator('#request-detail')).toBeHidden();
+  });
+
+  test('primary view stays focused on request paths', async ({ page }) => {
+    await page.goto(BASE_URL);
+    await expect(page.locator('#request-explorer')).toBeVisible();
+    await expect(page.locator('.path-note')).toContainText('Trace one request');
+    await expect(page.locator('.pools-section')).toHaveCount(0);
+    await expect(page.locator('.causal-section')).toHaveCount(0);
+    await expect(page.locator('.scores-section')).toHaveCount(0);
+    await expect(page.locator('.timeline-section')).toHaveCount(0);
+  });
+
+  test('generation shows a starting transition before running', async ({ page }) => {
+    await page.goto(BASE_URL);
+    await page.waitForTimeout(1800);
+    await page.route('**/generate', async route => {
+      if (route.request().method() === 'POST') await new Promise(resolve => setTimeout(resolve, 500));
+      await route.continue();
+    });
+    await page.locator('#generator-count').fill('1');
+    await page.locator('#generator-rate').fill('20');
+    await page.locator('#generator-start').click();
+    await expect(page.locator('#generator-status')).toHaveText('Starting');
+    await expect(page.locator('#generator-progress')).toContainText('Starting request generation');
+    await expect(page.locator('#generator-start')).toBeDisabled();
+    await page.locator('#generator-cancel').click();
+  });
+
+  test('demo generation populates request rows and request detail', async ({ page }) => {
+    await page.goto(BASE_URL);
+    await page.waitForTimeout(1800);
+    await page.locator('#generator-count').fill('3');
+    await page.locator('#generator-rate').fill('20');
+    await page.locator('#generator-start').click();
+    await expect(page.locator('.request-row').first()).toBeVisible({ timeout: 8000 });
+    await expect(page.locator('.generated-result')).toHaveCount(3, { timeout: 8000 });
+    await expect(page.locator('#generator-results')).toContainText('Generated request results');
+    await expect(page.locator('#generator-results')).toContainText(/SIMULATED|LIVE/);
+    await expect(page.locator('.generated-result-main').first()).toContainText('→');
+    await expect(page.locator('.experience-pill').first()).toContainText(/excellent|good|degraded|poor/);
+    await page.locator('.request-open').first().click();
+    await expect(page.locator('#request-detail')).toBeVisible();
+    await expect(page.locator('#request-detail-content')).toContainText('Why this experience score?');
+    await expect(page.locator('#request-detail-content')).toContainText('Replay safe synthetic request');
+    await page.locator('#generator-clear').click();
+    await expect(page.locator('#generator-results')).toContainText('No generated job results yet');
+    await expect(page.locator('.request-row').first()).toBeVisible();
+  });
+
+  test('history scrubber changes the visible request window', async ({ page }) => {
+    await page.goto(BASE_URL);
+    await page.waitForTimeout(1500);
+    await page.locator('#generator-count').fill('6');
+    await page.locator('#generator-rate').fill('20');
+    await page.locator('#generator-start').click();
+    await expect(page.locator('.request-row').first()).toBeVisible({ timeout: 8000 });
+    const before = await page.locator('.request-row').count();
+    await page.locator('#history-scrubber').fill('10');
+    const after = await page.locator('.request-row').count();
+    expect(after).toBeLessThanOrEqual(before);
+    await expect(page.locator('#history-scrubber-label')).toHaveText('Newest 10%');
+  });
+
+  test('visual replay can play and step through loaded evidence', async ({ page }) => {
+    await page.goto(BASE_URL);
+    await page.waitForTimeout(1400);
+    await page.locator('#generator-count').fill('4');
+    await page.locator('#generator-rate').fill('20');
+    await page.locator('#generator-start').click();
+    await expect(page.locator('.request-row').first()).toBeVisible({ timeout: 8000 });
+    await page.locator('#history-scrubber').fill('40');
+    await expect(page.locator('#history-scrubber-label')).toHaveText('Newest 40%');
+    await page.locator('#replay-play').click();
+    await expect(page.locator('#replay-play')).toHaveText('Pause');
+    await page.waitForTimeout(800);
+    await page.locator('#replay-play').click();
+    await expect(page.locator('#replay-play')).toHaveText('Play');
+  });
+
+  test('all four demo scenarios update the visible evidence', async ({ page }) => {
+    await page.goto(BASE_URL);
+    await page.waitForTimeout(1500);
+    for (const scenario of ['baseline', 'pressure', 'recovery', 'degraded']) {
+      await page.locator(`.scenario-btn[data-scenario="${scenario}"]`).click();
+      await expect(page.locator('.scenario-btn.active')).toHaveAttribute('data-scenario', scenario);
+      await expect(page.locator('#request-table')).toBeVisible();
+      await expect(page.locator('#request-summary-strip')).toContainText('requests in window');
+    }
+  });
+
+  test('GLB, llm-d/EPP, and Combined share the same request-first view', async ({ page }) => {
+    await page.goto(BASE_URL);
+    await page.waitForTimeout(1400);
+    for (const source of ['glb', 'vcr', 'combined']) {
+      await page.locator(`#btn-src-${source}`).click();
+      await expect(page.locator('#request-explorer')).toBeVisible();
+      await expect(page.locator('#request-table')).toBeVisible();
+      await expect(page.locator('#source-badge')).toHaveText(source === 'glb' ? 'GLB' : source === 'vcr' ? 'llm-d/EPP' : 'COMBINED');
+      await expect(page.locator('#evidence-badge')).toHaveText(/SIMULATION ENABLED|LIVE EVIDENCE|UNAVAILABLE/);
+    }
+  });
+
+  test('request explorer remains usable at mobile width', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.goto(BASE_URL);
+    await page.waitForTimeout(1800);
+    await expect(page.locator('#request-explorer')).toBeVisible();
+    const toolbar = await page.locator('.request-toolbar').boundingBox();
+    expect(toolbar).not.toBeNull();
+    expect(toolbar.width).toBeLessThanOrEqual(375);
   });
 });

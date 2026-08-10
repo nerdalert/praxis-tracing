@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-PORT="${PORT:-8080}"
+PORT="${PORT:-3001}"
 JAEGER_URL="${JAEGER_URL:-http://localhost:16686}"
 
 cd "$PROJECT_DIR"

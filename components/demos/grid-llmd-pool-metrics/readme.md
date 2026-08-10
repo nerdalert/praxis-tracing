@@ -172,6 +172,13 @@ pressure.
 - Approximately 8 GB RAM for two Kind clusters (vllm-vcr pods require more
   memory than the earlier backend)
 
+Install Rust if `cargo` and `rustc` are not already available:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+```
+
 ## Registry Images
 
 ```bash
@@ -224,22 +231,73 @@ inside the container) with the tokenizer files.
 
 ## Quick Start
 
+Run these commands from this demo directory:
+
 ```bash
+cd components/demos/grid-llmd-pool-metrics
 ./run.sh --quick --teardown
 ```
 
 This scrapes EPP directly over HTTP and does not deploy nginx or metrics TLS
 certificates.
 
+## Live UI and Demo Observation
+
+To observe the real pool-metrics run in the routing-observability UI, keep the
+Kind clusters running and start the tracing infrastructure and UI first.
+Open a terminal at the repository root:
+
+```bash
+export VCR_LIVE=true
+export VCR_KUBECTL_CONTEXT_A=kind-grid-llmd-pm-pool-a
+export VCR_KUBECTL_CONTEXT_B=kind-grid-llmd-pm-pool-b
+export VCR_QUEUE_CAPACITY=4
+./scripts/run-tracing.sh
+```
+
+The UI is then available at <http://localhost:3001> and Jaeger at
+<http://localhost:16686>. In a second terminal, from this demo directory, run
+the full lifecycle without teardown:
+
+```bash
+cd components/demos/grid-llmd-pool-metrics
+./run.sh --full
+```
+
+The UI must be running while the demo executes. It should show live llm-d/EPP
+values for both pools, including queue depth, KV-cache utilization, score,
+rank, overlay revision, and request attribution as the run moves through
+baseline, pressure, failover, and recovery. Do not use `--teardown` until the
+UI and evidence have been inspected.
+
+The UI's Generate Requests panel also supports a selectable entry gateway
+(Pool A or Pool B), concurrent workers, and tokens per request. For a manual
+pressure story, select the pool to stress, use 24 concurrent workers and 64
+tokens per request, then watch the EPP queue and score change. New requests
+are displayed in both Generated Request Results and the observed request
+table; when the v0.1.3 gateway does not emit OTel spans, the rows use the real
+gateway attribution header and are labeled sampled rather than presented as
+exact traces.
+
+After observation, clean up from the repository root:
+
+```bash
+kind delete cluster --name grid-llmd-pm-pool-a
+kind delete cluster --name grid-llmd-pm-pool-b
+./scripts/run-tracing.sh --teardown
+```
+
 To validate an mTLS-protected metrics endpoint:
 
 ```bash
+cd components/demos/grid-llmd-pool-metrics
 ./run.sh --quick --metrics-mtls --teardown
 ```
 
 ## Full Mode
 
 ```bash
+cd components/demos/grid-llmd-pool-metrics
 ./run.sh --full --teardown
 ```
 
@@ -251,6 +309,7 @@ Full mode adds the pressure-flip and recovery proofs.
 Add `--keep-on-failure` to retain clusters when a proof fails:
 
 ```bash
+cd components/demos/grid-llmd-pool-metrics
 ./run.sh --quick --teardown --keep-on-failure
 ```
 

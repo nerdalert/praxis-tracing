@@ -27,8 +27,32 @@ DEMO_DIR="$(cd "$1" && pwd)"
 shift
 DEMO_NAME="$(basename "${DEMO_DIR}")"
 
+require_command() {
+    local command_name="$1"
+    local install_hint="${2:-}"
+    if ! command -v "${command_name}" >/dev/null 2>&1; then
+        echo "error: required command not found: ${command_name}" >&2
+        if [[ -n "${install_hint}" ]]; then
+            echo "       ${install_hint}" >&2
+        fi
+        exit 1
+    fi
+}
+
+require_command cargo "Install Rust with: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+require_command rustc "Install Rust with: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+require_command kind "Install kind: https://kind.sigs.k8s.io/docs/user/quick-start/"
+require_command kubectl "Install kubectl: https://kubernetes.io/docs/tasks/tools/"
+
+if ! command -v docker >/dev/null 2>&1 && ! command -v podman >/dev/null 2>&1; then
+    echo "error: required container runtime not found: docker or podman" >&2
+    echo "       Install Docker or Podman before running the demo." >&2
+    exit 1
+fi
+
 # Resolve or clone Grid repository.
 if [[ -z "${GRID_REPO:-}" ]]; then
+    require_command git "Install Git before allowing the launcher to clone Grid."
     GRID_CLONE="${SCRIPT_DIR}/../.grid-checkout"
     if [[ ! -d "${GRID_CLONE}" ]]; then
         echo "GRID_REPO not set -- cloning praxis-proxy/grid into ${GRID_CLONE}..." >&2

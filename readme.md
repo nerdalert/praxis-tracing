@@ -34,7 +34,7 @@ Docker Compose is unavailable. Set `COMPOSE_RUNTIME` to choose explicitly.
 
 Open:
 
-- Observability UI: <http://localhost:8080>
+- Observability UI: <http://localhost:3001>
 - Jaeger: <http://localhost:16686>
 
 Run the complete synthetic A→B→A scenario:
@@ -49,7 +49,10 @@ Stop the local services:
 ./scripts/run-tracing.sh --teardown
 ```
 
-## UI validation
+## UI development checks
+
+The live demo does not require running automated test suites. To run the
+optional UI development checks:
 
 ```console
 cd routing-observability-ui
@@ -60,8 +63,9 @@ npx playwright test
 
 The UI supports a common provider, routing, pressure, score, timeline, and
 trace view across GLB and llm-d/VCR sources. It can run in live mode when
-Jaeger and Kubernetes are available, or in deterministic demo mode when they
-are not.
+Jaeger and Kubernetes are available. Missing live sources are shown as
+`UNAVAILABLE`; deterministic demo mode requires the explicit
+`ALLOW_SIMULATION=true` opt-in and is never presented as runtime evidence.
 
 For live llm-d/EPP/VCR metrics, use the pool-metrics Kind contexts:
 
@@ -71,15 +75,23 @@ JAEGER_URL=http://localhost:16686 \
 VCR_LIVE=true \
 VCR_KUBECTL_CONTEXT_A=kind-grid-llmd-pm-pool-a \
 VCR_KUBECTL_CONTEXT_B=kind-grid-llmd-pm-pool-b \
-PORT=8080 node server.js
+PORT=3001 node server.js
 ```
 
 ## Demo assets
 
 The validated VCR-backed pool-metrics demo is in
-`components/demos/demos/grid-llmd-pool-metrics/`. The GLB and combined-site
-assets are beside it. The authoritative runtime instructions remain in each
-demo README.
+[`components/demos/grid-llmd-pool-metrics/`](components/demos/grid-llmd-pool-metrics/readme.md).
+Its authoritative runtime instructions cover the two-cluster llm-d/EPP,
+vllm-vcr, scoring, pressure, failover, recovery, and optional metrics-mTLS
+workflow. For a live presentation, follow that README's Live UI and Demo
+Observation section; do not run the automated test suites as part of the
+presentation workflow.
+
+The multi-hop global load-balancing demo is in
+[`components/demos/grid-glb-demo/`](components/demos/grid-glb-demo/readme.md).
+The related colocated combined-site topology is in
+[`components/demos/grid-combined-site/`](components/demos/grid-combined-site/readme.md).
 
 The VCR backend is documented at
 <https://github.com/neuralmagic/vllm-vcr/blob/main/README.md>.
@@ -97,3 +109,6 @@ Grid demo integrations are intentionally isolated from the upstream Praxis and
 Grid repositories until the design is complete.
 
 See `runbook.md` for the reproducible runtime workflow and known limitations.
+
+The current v2 implementation checkpoint and its validation notes are in
+[`docs/v2-implementation.md`](docs/v2-implementation.md).

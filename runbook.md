@@ -37,7 +37,7 @@ The endpoints are:
 
 | Component | URL |
 |---|---|
-| Observability UI | http://localhost:8080 |
+| Observability UI | http://localhost:3001 |
 | Jaeger UI | http://localhost:16686 |
 | Jaeger API | http://localhost:16686/api |
 | OTel Collector | http://localhost:4318 |
@@ -90,8 +90,8 @@ Inspect live data:
 
 ```bash
 curl -s http://localhost:16686/api/services | python3 -m json.tool
-curl -s http://localhost:8080/api/status | python3 -m json.tool
-API_URL=http://localhost:8080 node routing-observability-ui/scripts/provider-status.js
+curl -s http://localhost:3001/api/status | python3 -m json.tool
+API_URL=http://localhost:3001 node routing-observability-ui/scripts/provider-status.js
 ./scripts/verify-glb-traces.sh
 ```
 

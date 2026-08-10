@@ -48,7 +48,7 @@ echo "[3/3] Evidence summary..."
 
 echo ""
 echo "=== Demo Ready ==="
-echo "  Observability UI: http://localhost:${UI_PORT:-8080}"
+echo "  Observability UI: http://localhost:${UI_PORT:-3001}"
 echo "  Jaeger UI:        http://localhost:16686"
 echo ""
 echo "  Stop all: $0 --teardown"
