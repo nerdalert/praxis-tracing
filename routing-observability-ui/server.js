@@ -40,7 +40,7 @@ const VCR_OVERLAY_CONFIGMAP = process.env.VCR_OVERLAY_CONFIGMAP
 // Synthetic values are opt-in. A normal deployment must never turn a missing
 // telemetry source into a convincing-looking demo state.
 const ALLOW_SIMULATION = process.env.ALLOW_SIMULATION === 'true';
-let liveVcrCache = { expires: 0, value: null };
+let liveVcrCache = { expires: 0, key: null, value: null };
 let glbReadiness = { expires: 0, available: false, reason: 'Not checked yet' };
 let vcrReadiness = { expires: 0, available: false, reason: 'Not checked yet' };
 
@@ -262,11 +262,13 @@ function sendVcrRequest(ip, prompt, sequence, maxTokens = 5) {
       },
     }, (res) => {
       const provider = res.headers['x-grid-llmd-provider-gateway'] || null;
+      const consumerGateway = res.headers['x-grid-llmd-consumer-gateway'] || null;
       res.resume();
       res.on('end', () => resolve({
         status: res.statusCode || 0,
         ok: res.statusCode >= 200 && res.statusCode < 300,
         provider,
+        consumer_gateway: consumerGateway,
       }));
     });
     req.on('error', (error) => resolve({ status: 0, ok: false, error: error.message }));
@@ -319,6 +321,7 @@ async function runVcrRequestJob(job, ip) {
         duration_ms: Date.now() - started,
         trace_id: null,
         provider: result.provider,
+        consumer_gateway: result.consumer_gateway,
         route: result.provider ? `consumer-gateway → ${result.provider}` : 'Gateway response received',
       };
       job.results.unshift(generatedResult);
@@ -343,10 +346,12 @@ async function runVcrRequestJob(job, ip) {
 // The selected pool is only the gateway where pressure enters; Grid remains
 // responsible for the provider selected for each request.
 async function runVcrLoadJob(job, ip) {
+  if (job.mode === 'sustained') return runVcrSustainedLoadJob(job, ip);
   const deadline = Date.now() + job.duration_seconds * 1000;
   let sequence = 0;
   // Rate is the requested total requests/sec. Concurrency controls the burst
-  // size, so six workers at 5 req/sec launch six requests about every 1.2s.
+  // size, so the default 24 workers at 20 req/sec launch 24 requests about
+  // every 1.2s while responses are attributed independently.
   const intervalMs = Math.max(50, Math.round(1000 * job.concurrency / job.rate_per_second));
   while (!job.cancelled && Date.now() < deadline) {
     const sequences = Array.from({ length: job.concurrency }, () => ++sequence);
@@ -357,13 +362,49 @@ async function runVcrLoadJob(job, ip) {
       else job.failed += 1;
       job.last_status = result.status;
       job.last_provider = result.provider || null;
+      job.last_consumer_gateway = result.consumer_gateway || null;
       if (result.provider) job.providers[result.provider] = (job.providers[result.provider] || 0) + 1;
+      if (result.consumer_gateway) job.consumer_gateways[result.consumer_gateway] = (job.consumer_gateways[result.consumer_gateway] || 0) + 1;
       emitEvent('load.progress', { job });
     }));
     if (!job.cancelled && Date.now() < deadline) {
       await new Promise(resolve => setTimeout(resolve, intervalMs));
     }
   }
+  job.running = false;
+  job.finished_at = new Date().toISOString();
+  job.stopped_reason = job.cancelled ? 'stopped by user' : 'duration complete';
+  emitEvent('load.finished', { job });
+}
+
+async function runVcrSustainedLoadJob(job, ip) {
+  const deadline = Date.now() + job.duration_seconds * 1000;
+  let sequence = 0;
+  let nextSlot = Date.now();
+  const slotInterval = 1000 / job.rate_per_second;
+  const waitForSlot = async () => {
+    const now = Date.now();
+    const slot = Math.max(now, nextSlot);
+    nextSlot = slot + slotInterval;
+    if (slot > now) await new Promise(resolve => setTimeout(resolve, slot - now));
+  };
+  const worker = async () => {
+    while (!job.cancelled && Date.now() < deadline) {
+      await waitForSlot();
+      if (job.cancelled || Date.now() >= deadline) break;
+      const result = await sendVcrRequest(ip, job.prompt, `load-${job.id}-${++sequence}`, job.max_tokens);
+      job.completed += 1;
+      if (result.ok) job.succeeded += 1;
+      else job.failed += 1;
+      job.last_status = result.status;
+      job.last_provider = result.provider || null;
+      job.last_consumer_gateway = result.consumer_gateway || null;
+      if (result.provider) job.providers[result.provider] = (job.providers[result.provider] || 0) + 1;
+      if (result.consumer_gateway) job.consumer_gateways[result.consumer_gateway] = (job.consumer_gateways[result.consumer_gateway] || 0) + 1;
+      emitEvent('load.progress', { job });
+    }
+  };
+  await Promise.all(Array.from({ length: job.concurrency }, worker));
   job.running = false;
   job.finished_at = new Date().toISOString();
   job.stopped_reason = job.cancelled ? 'stopped by user' : 'duration complete';
@@ -1486,6 +1527,7 @@ app.post('/api/load', async (req, res) => {
   const duration = Math.min(300, Math.max(5, Number.parseInt(req.body?.duration_seconds ?? 30, 10) || 30));
   const rate = Math.min(50, Math.max(0.1, Number(req.body?.rate ?? 5) || 5));
   const concurrency = Math.min(24, Math.max(1, Number.parseInt(req.body?.concurrency ?? 6, 10) || 6));
+  const mode = req.body?.mode === 'sustained' ? 'sustained' : 'pulse';
   const targetPool = req.body?.target_pool === 'pool-b' ? 'pool-b' : 'pool-a';
   const maxTokens = Math.min(256, Math.max(1, Number.parseInt(req.body?.max_tokens ?? 32, 10) || 32));
   const prompt = typeof req.body?.prompt === 'string' && req.body.prompt.trim()
@@ -1498,6 +1540,7 @@ app.post('/api/load', async (req, res) => {
       running: true,
       target: 'llmd-load',
       target_pool: targetPool,
+      mode,
       duration_seconds: duration,
       rate_per_second: rate,
       concurrency,
@@ -1510,7 +1553,9 @@ app.post('/api/load', async (req, res) => {
       failed: 0,
       last_status: null,
       last_provider: null,
+      last_consumer_gateway: null,
       providers: {},
+      consumer_gateways: {},
       started_at: new Date().toISOString(),
       finished_at: null,
       stopped_reason: null,
@@ -1729,9 +1774,10 @@ function parsePrometheusGauge(metrics, metricName, poolName) {
   return Number.isFinite(value) ? value : null;
 }
 
-async function loadLiveVcrState() {
+async function loadLiveVcrState(perspectivePool = 'pool-a') {
   if (!VCR_LIVE_ENABLED) return null;
-  if (liveVcrCache.expires > Date.now()) return liveVcrCache.value;
+  const perspectiveKey = perspectivePool === 'pool-b' ? 'pool-b' : 'pool-a';
+  if (liveVcrCache.expires > Date.now() && liveVcrCache.key === perspectiveKey) return liveVcrCache.value;
 
   try {
     const pools = [];
@@ -1749,9 +1795,7 @@ async function loadLiveVcrState() {
       pools.push({ context, metrics, overlay });
     }
 
-    // Use the first consumer's overlay as the dashboard perspective. It
-    // contains both local and remote candidates and their current scores.
-    const primary = pools[0];
+    const primary = pools[perspectiveKey === 'pool-b' ? 1 : 0];
     // Current Grid overlay ConfigMaps use a top-level candidates array;
     // earlier experimental snapshots nested it under overlay. Accept both
     // schemas while preserving the live values exactly as published.
@@ -1817,11 +1861,11 @@ async function loadLiveVcrState() {
         || null,
       contexts: VCR_CONTEXTS,
     };
-    liveVcrCache = { expires: Date.now() + 2000, value };
+    liveVcrCache = { expires: Date.now() + 2000, key: perspectiveKey, value };
     return value;
   } catch (error) {
     console.error(`Live llm-d/EPP state unavailable: ${error.message}`);
-    liveVcrCache = { expires: Date.now() + 2000, value: null };
+    liveVcrCache = { expires: Date.now() + 2000, key: perspectiveKey, value: null };
     return null;
   }
 }
@@ -2157,8 +2201,8 @@ app.get('/api/vcr/status', async (_req, res) => {
   });
 });
 
-app.get('/api/vcr/providers', async (_req, res) => {
-  const live = await loadLiveVcrState();
+app.get('/api/vcr/providers', async (req, res) => {
+  const live = await loadLiveVcrState(req.query.target_pool);
   if (live) return res.json(live);
   const evidence = loadVcrEvidence();
   if (!evidence) {
@@ -2175,8 +2219,8 @@ app.get('/api/vcr/providers', async (_req, res) => {
   });
 });
 
-app.get('/api/vcr/timeline', async (_req, res) => {
-  const live = await loadLiveVcrState();
+app.get('/api/vcr/timeline', async (req, res) => {
+  const live = await loadLiveVcrState(req.query.target_pool);
   if (live) {
     const selected = live.providers.find(provider => provider.rank === 0) || live.providers[0];
     const metrics = live.providers.map(provider => {

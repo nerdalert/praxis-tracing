@@ -313,6 +313,7 @@
   window.startLoadGeneration = async function () {
     const payload = {
       target_pool: document.getElementById('load-pool').value,
+      mode: document.getElementById('load-mode').value,
       duration_seconds: Number(document.getElementById('load-duration').value),
       rate: Number(document.getElementById('load-rate').value),
       concurrency: Number(document.getElementById('load-concurrency').value),
@@ -463,10 +464,43 @@
       progress.innerHTML = `<span class="generator-error"><strong>Load did not start.</strong> ${escapeHtml(status.error)}</span>`;
     } else if (job) {
       const providers = Object.entries(job.providers || {}).sort(([, a], [, b]) => b - a).map(([name, count]) => `${escapeHtml(name)} ${count}`).join(' · ') || 'no attribution yet';
-      progress.innerHTML = `<div class="load-progress-grid"><div><strong>${job.target_pool || '—'}</strong><span>pressure target</span></div><div><strong>${job.completed}</strong><span>requests sent</span></div><div class="success"><strong>${job.succeeded}</strong><span>HTTP success</span></div><div class="failed"><strong>${job.failed}</strong><span>failed</span></div><div><strong>${job.rate_per_second}</strong><span>requested req/sec</span></div></div><p class="load-attribution"><b>Observed provider attribution:</b> ${providers}</p><p class="load-note">${running ? `Running for ${job.duration_seconds}s; stop it when the selected pool reaches elevated or critical pressure.` : `Finished: ${escapeHtml(job.stopped_reason || 'complete')}. Grid was not told which provider to select.`}</p>`;
+      const gateways = Object.entries(job.consumer_gateways || {}).sort(([, a], [, b]) => b - a).map(([name, count]) => `${escapeHtml(name)} ${count}`).join(' · ') || `target ${escapeHtml(job.target_pool || '—')} · awaiting response header`;
+      const modeLabel = job.mode === 'sustained' ? 'sustained workers' : 'pulse batches';
+      const ingressLabel = job.target_pool === 'pool-a' ? 'Pool A consumer gateway' : job.target_pool === 'pool-b' ? 'Pool B consumer gateway' : '—';
+      progress.innerHTML = `<div class="load-progress-grid"><div><strong>${ingressLabel}</strong><span>pressure ingress target</span></div><div><strong>${modeLabel}</strong><span>pressure pattern</span></div><div><strong>${job.completed}</strong><span>requests sent</span></div><div class="success"><strong>${job.succeeded}</strong><span>HTTP success</span></div><div class="failed"><strong>${job.failed}</strong><span>failed</span></div><div><strong>${job.rate_per_second}</strong><span>requested req/sec</span></div></div><p class="load-attribution"><b>Ingress gateway (response header):</b> ${gateways}</p><p class="load-attribution"><b>Observed provider attribution:</b> ${providers}</p><p class="load-note">${running ? `Running ${modeLabel} for ${job.duration_seconds}s; this ingress gateway stays fixed while Grid may change the selected provider.` : `Finished: ${escapeHtml(job.stopped_reason || 'complete')}. This was the pressure ingress target, not a forced provider selection.`}</p>`;
     } else {
       progress.textContent = 'No sustained load running.';
     }
+  }
+
+  function renderLoadEppDetails(gatewayViews = []) {
+    const container = document.getElementById('load-epp-details');
+    if (!container || currentDataSource !== 'vcr') return;
+    if (!gatewayViews.some(view => view.providers?.length)) {
+      container.innerHTML = '<div class="load-epp-empty">EPP details are unavailable until live llm-d metrics are discovered.</div>';
+      return;
+    }
+    const renderRows = providers => [...providers].sort((a, b) => {
+      const rankA = typeof a.rank === 'number' ? a.rank : Number.MAX_SAFE_INTEGER;
+      const rankB = typeof b.rank === 'number' ? b.rank : Number.MAX_SAFE_INTEGER;
+      return rankA - rankB || String(a.site || a.cluster || '').localeCompare(String(b.site || b.cluster || ''));
+    }).map(provider => {
+      const site = provider.site || provider.cluster || provider.name || 'unknown';
+      const displaySite = site === 'pool-a' ? 'Pool A' : site === 'pool-b' ? 'Pool B' : site;
+      const queue = provider.queue_depth?.value ?? provider.queue_depth;
+      const rawQueue = provider.queue_depth?.raw_value;
+      const capacity = provider.queue_depth?.capacity;
+      const kv = provider.kv_cache?.value ?? provider.kv_cache;
+      const queueText = typeof queue === 'number' ? `${queue.toFixed(2)}${typeof capacity === 'number' ? ` / ${capacity}` : ''}` : '—';
+      const rawText = typeof rawQueue === 'number' ? `raw ${rawQueue}` : '';
+      const kvText = typeof kv === 'number' ? `${Math.round(kv * 100)}%` : '—';
+      const score = typeof provider.score === 'number' ? provider.score.toFixed(2) : '—';
+      const rank = typeof provider.rank === 'number' ? `#${provider.rank}` : '—';
+      const fresh = provider.queue_depth?.fresh === false || provider.kv_cache?.fresh === false ? 'stale' : 'fresh';
+      return `<tr><td><strong>${escapeHtml(displaySite)}</strong><small>${escapeHtml(site)} · ${escapeHtml(provider.cluster || provider.name || '')}</small></td><td>${rank}</td><td>${queueText}<small>${rawText}</small></td><td>${kvText}</td><td><span class="pressure-badge ${pressureClass(provider.pressure_level || 'unknown')}">${pressureLabel(provider.pressure_level || 'unknown')}</span></td><td>${score}</td><td><span class="epp-freshness epp-${fresh}">${fresh}</span></td></tr>`;
+    }).join('');
+    const tables = gatewayViews.filter(view => view.providers?.length).map(view => `<section class="load-epp-perspective"><h4>${escapeHtml(view.label)} consumer gateway routing view</h4><p>Higher score wins. If scores tie, this consumer gateway’s locality and other tie-breakers determine rank.</p><div class="load-epp-table-wrap"><table class="load-epp-table"><thead><tr><th>Provider / site</th><th>Rank</th><th>Queue / capacity</th><th>KV cache</th><th>Pressure</th><th>Score</th><th>Metric state</th></tr></thead><tbody>${renderRows(view.providers)}</tbody></table></div></section>`).join('');
+    container.innerHTML = `<div class="load-epp-heading"><div><strong>EPP details · both consumer gateway perspectives</strong><span>Each table shows the live EPP signals and routing order seen by that consumer gateway. Provider gateways receive the selected request; they do not choose the winner.</span></div><span>Refreshes every 3s</span></div>${tables}`;
   }
 
   function renderGeneratedResults(job) {
@@ -734,6 +768,7 @@
 
   function renderPoolCards(pools, latestTrace) {
     const container = document.getElementById('pool-cards');
+    if (!container) return;
     if (!Array.isArray(pools) || pools.length === 0) {
       container.innerHTML = '<div class="empty-state provider-unavailable">No provider data. Connect a live Grid source or explicitly enable simulation for local fixtures.</div>';
       return;
@@ -1178,13 +1213,17 @@
   function renderRoutingState(trace, pools, scoringStrategy, overlayRevision) {
     const selected = pools?.find(p => p.rank === 0) || pools?.[0];
     const selectedName = selected?.cluster || selected?.name;
-    document.getElementById('routing-policy').textContent = trace?.routing_policy || (selected ? 'scoreFirst' : '—');
-    document.getElementById('routing-selected').textContent = trace?.selected_cluster || trace?.selected_provider || selectedName || '—';
-    document.getElementById('routing-decision').textContent = trace?.routing_decision || (selected ? `Live EPP rank #1 · ${scoringStrategy || 'unknown'}` : '—');
-    document.getElementById('routing-score').textContent = typeof trace?.provider_score === 'number'
-      ? trace.provider_score.toFixed(2) : typeof selected?.score === 'number' ? selected.score.toFixed(2) : '—';
-    document.getElementById('routing-revision').textContent = trace?.overlay_revision || overlayRevision || '—';
-    document.getElementById('routing-admission').textContent = trace?.admission_state || selected?.admission_state || '—';
+    const setText = (id, value) => {
+      const element = document.getElementById(id);
+      if (element) element.textContent = value;
+    };
+    setText('routing-policy', trace?.routing_policy || (selected ? 'scoreFirst' : '—'));
+    setText('routing-selected', trace?.selected_cluster || trace?.selected_provider || selectedName || '—');
+    setText('routing-decision', trace?.routing_decision || (selected ? `Live EPP rank #1 · ${scoringStrategy || 'unknown'}` : '—'));
+    setText('routing-score', typeof trace?.provider_score === 'number'
+      ? trace.provider_score.toFixed(2) : typeof selected?.score === 'number' ? selected.score.toFixed(2) : '—');
+    setText('routing-revision', trace?.overlay_revision || overlayRevision || '—');
+    setText('routing-admission', trace?.admission_state || selected?.admission_state || '—');
   }
 
   // -----------------------------------------------------------------------
@@ -1193,6 +1232,7 @@
 
   function renderScoreBars(pools) {
     const container = document.getElementById('score-bars');
+    if (!container) return;
     const scores = pools.map(p => typeof p.score === 'number' ? p.score : 0);
     if (!pools.some(p => typeof p.score === 'number')) {
       container.innerHTML = '<div class="score-unavailable"><strong>Score components unavailable</strong><span>This source exposes provider identity and routing state, but not the component contributions used to calculate its score. No bar is shown.</span></div>';
@@ -1222,6 +1262,7 @@
 
   async function refreshAll() {
     try {
+      const targetPool = document.getElementById('load-pool')?.value || 'pool-a';
       const fetches = [
         fetchStatus(),
         fetchPools(),
@@ -1233,17 +1274,20 @@
       ];
 
       if (currentDataSource === 'vcr' || currentDataSource === 'combined') {
-        fetches.push(apiFetch('/vcr/providers').catch(() => null));
-        fetches.push(apiFetch('/vcr/timeline').catch(() => null));
+        fetches.push(apiFetch('/vcr/providers?target_pool=pool-a').catch(() => null));
+        fetches.push(apiFetch(`/vcr/timeline?target_pool=${encodeURIComponent(targetPool)}`).catch(() => null));
+        fetches.push(apiFetch('/vcr/providers?target_pool=pool-b').catch(() => null));
       }
 
       const results = await Promise.all(fetches);
       const [status, poolData, providerData, timelineData, generatorData, loadData, attributionData] = results;
       const vcrProviders = results[7] || null;
       const vcrTimeline = results[8] || null;
+      const vcrProvidersB = results[9] || null;
 
-      if (currentDataSource === 'vcr' && vcrProviders?.providers?.length) {
-        lastPoolData = vcrProviders;
+      const activeVcrProviders = targetPool === 'pool-b' ? vcrProvidersB : vcrProviders;
+      if (currentDataSource === 'vcr' && activeVcrProviders?.providers?.length) {
+        lastPoolData = activeVcrProviders;
       } else if (providerData) {
         lastPoolData = providerData;
       }
@@ -1264,9 +1308,9 @@
         updateActiveScenario(status.scenario);
       }
 
-      const useVcrPools = currentDataSource === 'vcr' && vcrProviders?.providers?.length;
+      const useVcrPools = currentDataSource === 'vcr' && activeVcrProviders?.providers?.length;
       const displayPools = useVcrPools
-        ? vcrProviders.providers.map(p => ({
+        ? activeVcrProviders.providers.map(p => ({
             ...p,
             queue_depth: p.queue_depth?.value ?? p.queue_depth,
             queue_depth_raw: p.queue_depth?.raw_value ?? null,
@@ -1279,9 +1323,13 @@
         renderPoolCards(displayPools, displayTrace);
         renderScoreBars(displayPools);
       }
+      renderLoadEppDetails([
+        { label: 'Pool A', providers: vcrProviders?.providers || [] },
+        { label: 'Pool B', providers: vcrProvidersB?.providers || [] },
+      ]);
 
       if (displayTrace || useVcrPools) {
-        renderRoutingState(displayTrace, displayPools, vcrProviders?.scoring_strategy || poolData?.scoring_strategy, vcrProviders?.overlay_revision);
+        renderRoutingState(displayTrace, displayPools, activeVcrProviders?.scoring_strategy || poolData?.scoring_strategy, activeVcrProviders?.overlay_revision);
       }
 
       const refreshState = document.getElementById('provider-refresh-state');

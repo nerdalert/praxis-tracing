@@ -115,12 +115,14 @@ emit an OTel trace.
 
 For a sustained pressure test, use **Run sustained load** below the ordinary
 request generator. Select the gateway where pressure should enter, duration,
-total request rate, and worker concurrency. The job sends real VCR requests
-until the duration expires or you stop it, while the provider cards continue to
-refresh from EPP. The load panel reports requests sent, HTTP outcomes, and
-provider attribution; it does not claim that the selected ingress pool was the
-provider chosen by Grid. This control is available only for the live llm-d/EPP
-source and requires both Kind pool contexts.
+total request rate, worker concurrency, and a pressure pattern. **Pulse
+batches** preserves burst-and-recovery behavior; **Sustained workers** keeps
+independent workers replenishing requests until the duration expires or you
+stop the job. The provider cards and EPP details continue to refresh while the
+load runs. The load panel reports ingress-gateway verification, HTTP outcomes,
+and provider attribution; it does not claim that the selected ingress pool was
+the provider chosen by Grid. This control is available only for the live
+llm-d/EPP source and requires both Kind pool contexts.
 
 ## Scoring model
 

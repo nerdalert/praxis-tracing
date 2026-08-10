@@ -96,28 +96,29 @@
         <div class="generator-results-empty">Each generated request will appear here with its result and observed route.</div>
       </div>
       <div id="generator-attribution" class="generator-attribution" aria-live="polite">Observed trace attribution will appear here.</div>
-    </section>
-
-    <section id="llmd-load" class="llmd-load hidden" aria-labelledby="llmd-load-title">
-      <div class="llmd-load-header">
-        <div>
-          <div class="eyebrow">llm-d pressure control</div>
-          <h2 id="llmd-load-title">Run sustained load</h2>
-          <p>Send continuous real requests from this dashboard process into one consumer gateway to raise pressure on that pool. This is a load entry point, not a routing choice: Grid still selects the provider for each request.</p>
+      <div id="llmd-load" class="llmd-load hidden" aria-labelledby="llmd-load-title">
+        <div class="llmd-load-header">
+          <div>
+            <div class="eyebrow">llm-d pressure control</div>
+            <h2 id="llmd-load-title">Run sustained load</h2>
+            <p>Send continuous real requests from this dashboard process into one consumer gateway to raise pressure on that pool. This is a load entry point, not a routing choice: Grid still selects the provider for each request.</p>
+          </div>
+          <span id="load-status" class="generator-status">Ready</span>
         </div>
-        <span id="load-status" class="generator-status">Ready</span>
+        <div class="llmd-load-controls">
+          <label>Load enters through <select id="load-pool"><option value="pool-a">Pool A gateway</option><option value="pool-b">Pool B gateway</option></select></label>
+          <label>Pressure pattern <select id="load-mode"><option value="pulse">Pulse batches</option><option value="sustained">Sustained workers</option></select></label>
+          <label>Duration (sec) <input id="load-duration" type="number" min="5" max="300" value="30"></label>
+          <label>Rate (req/sec) <input id="load-rate" type="number" min="0.1" max="50" step="0.1" value="20"></label>
+          <label>Concurrent workers <input id="load-concurrency" type="number" min="1" max="24" value="24"></label>
+          <label>Tokens/request <input id="load-max-tokens" type="number" min="1" max="256" value="64"></label>
+          <button id="load-start" class="primary-btn" type="button" onclick="startLoadGeneration()">Start load</button>
+          <button id="load-cancel" class="secondary-btn hidden" type="button" onclick="cancelLoadGeneration()">Stop load</button>
+        </div>
+        <div id="load-target-status" class="generator-target-status" aria-live="polite"><strong>Checking llm-d load target…</strong></div>
+        <div id="load-progress" class="load-progress" aria-live="polite">No sustained load running.</div>
+        <div id="load-epp-details" class="load-epp-details" aria-live="polite"></div>
       </div>
-      <div class="llmd-load-controls">
-        <label>Load enters through <select id="load-pool"><option value="pool-a">Pool A gateway</option><option value="pool-b">Pool B gateway</option></select></label>
-        <label>Duration (sec) <input id="load-duration" type="number" min="5" max="300" value="30"></label>
-        <label>Rate (req/sec) <input id="load-rate" type="number" min="0.1" max="50" step="0.1" value="5"></label>
-        <label>Concurrent workers <input id="load-concurrency" type="number" min="1" max="24" value="6"></label>
-        <label>Tokens/request <input id="load-max-tokens" type="number" min="1" max="256" value="32"></label>
-        <button id="load-start" class="primary-btn" type="button" onclick="startLoadGeneration()">Start load</button>
-        <button id="load-cancel" class="secondary-btn hidden" type="button" onclick="cancelLoadGeneration()">Stop load</button>
-      </div>
-      <div id="load-target-status" class="generator-target-status" aria-live="polite"><strong>Checking llm-d load target…</strong></div>
-      <div id="load-progress" class="load-progress" aria-live="polite">No sustained load running.</div>
     </section>
 
     <section class="path-note">

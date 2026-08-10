@@ -94,6 +94,15 @@ body {
 .load-progress-grid .success strong { color: #6ee7b7; }.load-progress-grid .failed strong { color: #fca5a5; }
 .load-attribution { margin-top: .7rem; color: #e7eef9; font-family: var(--font-mono); font-size: .72rem; }
 .load-note { margin-top: .35rem; color: #c7b77a; font-size: .72rem; }
+.load-epp-details { margin-top: 1rem; padding-top: .9rem; border-top: 1px solid #66572e; }
+.load-epp-heading { display: flex; align-items: baseline; justify-content: space-between; gap: .75rem; margin-bottom: .55rem; color: #c7b77a; font-size: .7rem; }
+.load-epp-heading strong, .load-epp-heading span { display: block; }.load-epp-heading strong { color: #fef3c7; font-size: .85rem; }.load-epp-heading div span { margin-top: .15rem; color: #c7b77a; }.load-epp-heading > span { white-space: nowrap; }
+.load-epp-table-wrap { overflow-x: auto; border: 1px solid #66572e; border-radius: 7px; }
+.load-epp-table { width: 100%; min-width: 700px; border-collapse: collapse; font-size: .72rem; }
+.load-epp-perspective { margin-top: .75rem; }.load-epp-perspective h4 { margin: 0 0 .2rem; color: #fef3c7; font-size: .76rem; }.load-epp-perspective p { margin: 0 0 .4rem; color: #c7b77a; font-size: .68rem; }
+.load-epp-table th { padding: .55rem .65rem; color: #c7b77a; background: rgba(65, 49, 17, .45); font-size: .63rem; letter-spacing: .05em; text-align: left; text-transform: uppercase; }
+.load-epp-table td { padding: .55rem .65rem; border-top: 1px solid #544827; color: #e7eef9; white-space: nowrap; }.load-epp-table td small { display: block; margin-top: .15rem; color: #a79a6b; font-family: var(--font-mono); font-size: .62rem; }.load-epp-table .pressure-badge { font-size: .6rem; }.load-epp-empty { padding: .7rem; color: #c7b77a; font-size: .72rem; }
+.epp-freshness { color: #86efac; font-size: .65rem; text-transform: uppercase; }.epp-stale { color: #fcd34d; }
 .attribution-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: .65rem; margin-bottom: .6rem; }
 .attribution-heading strong { color: #e7eef9; font-size: .95rem; }
 .attribution-heading span { color: var(--muted, #91a0b7); font-size: .75rem; }
