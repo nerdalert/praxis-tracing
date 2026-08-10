@@ -82,10 +82,9 @@ PORT=3001 node server.js
 - **[Grid llm-d pool metrics](components/demos/grid-llmd-pool-metrics/readme.md)** — VCR-backed two-cluster llm-d/EPP scoring, pressure, failover, recovery, and optional metrics-mTLS.
 - **[Grid GLB demo](components/demos/grid-glb-demo/readme.md)** — multi-hop global load balancing through GTM, edge, and provider gateways.
 - **[Grid combined-site](components/demos/grid-combined-site/readme.md)** — colocated multi-site routing with the same VCR-backed provider pattern.
+- **[QueueDepth routing demo video](https://drive.google.com/file/d/1VZlxfl1fSFTYE0VnFmCb1Zxt9ufA7ox1/view?usp=sharing)**
 
-These are the canonical demo assets. For a live presentation, follow the
-selected demo README's runtime and observation instructions; do not run the
-automated test suites as part of the presentation workflow.
+These are the canonical demo assets.
 
 The VCR backend is documented at
 <https://github.com/neuralmagic/vllm-vcr/blob/main/README.md>.
@@ -94,6 +93,8 @@ The OTel-enabled Praxis AI fork used by the tracing demos is
 <https://github.com/nerdalert/ai/tree/grid-otel-demo>. The fork contains the
 experimental tracing hooks and must be used when running the real Praxis/GLB
 path; the standard released Praxis image does not provide those hooks.
+
+<img width="975" height="1115" alt="grid-queuedepth-demo" src="https://github.com/user-attachments/assets/85c6bc51-efb2-45df-857f-0d93d28c0802" />
 
 ## Status
 
