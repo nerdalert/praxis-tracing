@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kubernetes-llmd-vcr.fullname" . }}
+  labels:
+    app: vllm-vcr
+    pool: {{ .Values.poolName | quote }}
+    app.kubernetes.io/name: {{ include "kubernetes-llmd-vcr.name" . }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: vllm-vcr
+      pool: {{ .Values.poolName | quote }}
+  template:
+    metadata:
+      labels:
+        app: vllm-vcr
+        pool: {{ .Values.poolName | quote }}
+        app.kubernetes.io/name: {{ include "kubernetes-llmd-vcr.name" . }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: vcr
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: MODEL
+              value: {{ .Values.model | quote }}
+            - name: MOCK_PD_ROLE
+              value: both
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: VLLM_PORT
+              value: "8000"
+            - name: MOCK_MAX_NUM_SEQS
+              value: {{ .Values.vcr.maxNumSeqs | quote }}
+            - name: MOCK_KV_CACHE_SIZE
+              value: {{ .Values.vcr.kvCacheSize | quote }}
+            - name: MOCK_TOKENS_PER_BLOCK
+              value: {{ .Values.vcr.tokensPerBlock | quote }}
+            - name: MOCK_MAX_MODEL_LEN
+              value: {{ .Values.vcr.maxModelLen | quote }}
+            - name: MOCK_TTFT_MS
+              value: {{ .Values.vcr.ttftMs | quote }}
+            - name: MOCK_ITL_MS
+              value: {{ .Values.vcr.itlMs | quote }}
+            - name: MOCK_TIME_FACTOR_UNDER_LOAD
+              value: {{ .Values.vcr.timeFactorUnderLoad | quote }}
+          ports:
+            - name: http
+              containerPort: 8000
+          startupProbe:
+            httpGet:
+              path: /v1/models
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            runAsNonRoot: true
+          resources: {{- toYaml .Values.resources | nindent 12 }}

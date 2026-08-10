@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.serviceName }}
+  labels:
+    app: vllm-vcr
+    pool: {{ .Values.poolName | quote }}
+    app.kubernetes.io/name: {{ include "kubernetes-llmd-vcr.name" . }}
+spec:
+  type: ClusterIP
+  selector:
+    app: vllm-vcr
+    pool: {{ .Values.poolName | quote }}
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

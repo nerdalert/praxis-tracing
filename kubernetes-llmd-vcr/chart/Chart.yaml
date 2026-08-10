@@ -1,0 +1,6 @@
+apiVersion: v2
+name: kubernetes-llmd-vcr
+description: CPU-safe vllm-vcr backends for an llm-d EPP pool
+type: application
+version: 0.1.0
+appVersion: vllm0.23
