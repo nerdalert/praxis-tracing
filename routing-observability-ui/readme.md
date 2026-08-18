@@ -148,6 +148,79 @@ The live source expects the pool-metrics demo's default contexts and ConfigMap;
 override `VCR_NAMESPACE`, `VCR_OVERLAY_CONFIGMAP`, or `VCR_QUEUE_CAPACITY` when
 using a data-driven topology with different resource names or queue capacity.
 
+## Opt-in token-rate-limit demo
+
+The quota view is disabled by default and does not request quota-specific data.
+Enable the capability explicitly with:
+
+```console
+TRACING_UI_TOKEN_RATE_LIMIT=true node server.js
+```
+
+Synthetic quota fixtures require a second explicit setting:
+
+```console
+TRACING_UI_TOKEN_RATE_LIMIT=true \
+TRACING_UI_FIXTURE_MODE=token-rate-limit \
+node server.js
+```
+
+The fixture view uses the normalized `/api/v1/token-rate-limit` contract and
+shows principal `alice`, the canonical model, both ingress consumers, one
+shared quota key, admission, remaining capacity, reset and `Retry-After`
+details, provider distribution, overlay revision, and the complete admitted or
+denied path. Denied HTTP 429 requests visibly stop after quota admission and
+have no provider or backend hop. Available fixture states are `admitted`,
+`exhausted`, `concurrent-race`, and `recovered`.
+
+The contract is intentionally independent of OTel exporter attribute names:
+`request`, `quota`, `route`, `http`, and `trace` are normalized at the adapter
+boundary. Synthetic fixtures and the live server-side adapter populate the
+same UI contract and remain visibly distinguished by their provenance label.
+
+### Live distributed-quota profile
+
+The live profile sends authenticated requests from the UI server, never from
+browser JavaScript. Configure both consumer gateways and provide the demo
+password through an environment variable or mounted file:
+
+```console
+TRACING_UI_TOKEN_RATE_LIMIT=true \
+TRACING_UI_TOKEN_CONSUMER_A_URL=http://consumer-a.example:8080 \
+TRACING_UI_TOKEN_CONSUMER_B_URL=http://consumer-b.example:8080 \
+TRACING_UI_TOKEN_USERNAME=alice \
+TRACING_UI_TOKEN_PASSWORD_FILE=/run/secrets/alice-password \
+TRACING_UI_TOKEN_MODEL=Qwen/Qwen3-0.6B \
+TRACING_UI_TOKEN_LIMIT=60 \
+TRACING_UI_TOKEN_WINDOW_SECONDS=60 \
+PORT=3001 \
+node server.js
+```
+
+`TRACING_UI_TOKEN_PASSWORD` is available for isolated local development, but a
+mounted secret file is preferred. Neither form is returned through the API or
+included in browser assets.
+
+When the complete live contract is present, the page switches to the focused
+distributed-token-quota profile. It hides unrelated GLB and llm-d generators
+and shows:
+
+- Consumer Gateway A and Consumer Gateway B as separate edge entries;
+- one shared Valkey quota ledger;
+- west, central, and east provider gateways from the Grid overlay;
+- explicit request buttons for both consumers;
+- one persistent observed row and compact request path per response;
+- live provider attribution and rate-limit response headers;
+- pre-provider `429` and `503` paths with no provider placeholder;
+- a clear-results action that changes only bounded UI history.
+
+The in-memory display history is capped at 100 requests. Clearing it does not
+reset Valkey, delete traces, restart gateways, or change provider/backend
+counters. Admitted responses that do not contain rate-limit headers show their
+observed token usage without fabricating a remaining-quota value. Authoritative
+limit, remaining, reset, and `Retry-After` values appear when emitted by the
+gateway.
+
 When `llm-d/EPP` is selected, Generate Requests sends real HTTP traffic through
 the selected consumer gateway. `Traffic origin` chooses Pool A or Pool B as the
 gateway where the request enters; it does not tell Grid which provider to

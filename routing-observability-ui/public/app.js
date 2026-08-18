@@ -17,6 +17,9 @@
   let lastGeneratorError = null;
   let currentGeneratorJob = null;
   let hiddenGeneratorJobId = null;
+  let tokenRateLimitEnabled = false;
+  let tokenRateLimitLive = false;
+  let tokenRateLimitState = 'recovered';
 
   // -----------------------------------------------------------------------
   // API
@@ -72,6 +75,100 @@
   }
 
   async function fetchCapabilities() { return apiFetch('/v1/capabilities'); }
+
+  async function fetchTokenRateLimit() {
+    return apiFetch(`/v1/token-rate-limit?state=${encodeURIComponent(tokenRateLimitState)}`);
+  }
+
+  function tokenPathHtml(item) {
+    const labels = item.route?.hops || [];
+    return `<div class="token-path ${item.admission === 'admitted' ? 'admitted' : 'stopped'}">${labels.map((label, index) => {
+      const chip = `<span class="token-path-chip">${escapeHtml(label.replaceAll('-', ' '))}</span>`;
+      return index === labels.length - 1 ? chip : `${chip}<span class="token-path-edge" aria-hidden="true">→</span>`;
+    }).join('')}</div>`;
+  }
+
+  function quotaValue(value) { return value === null || value === undefined ? '—' : String(value); }
+
+  function renderTokenRateLimitResponse(response) {
+    const panel = document.getElementById('token-rate-limit-panel');
+    const empty = document.getElementById('token-rate-limit-empty');
+    const content = document.getElementById('token-rate-limit-content');
+    if (!panel || !empty || !content) return;
+    panel.classList.toggle('hidden', !tokenRateLimitEnabled);
+    if (!tokenRateLimitEnabled) return;
+    const source = document.getElementById('token-rate-limit-source');
+    const fixtureControls = document.getElementById('token-rate-limit-controls');
+    const liveControls = document.getElementById('token-rate-limit-live-controls');
+    const data = response?.data;
+    if (!data) {
+      content.classList.add('hidden');
+      empty.classList.remove('hidden');
+      empty.textContent = response?.warning || 'Token-rate-limit data is unavailable.';
+      if (source) source.textContent = 'ENABLED · NO DATA';
+      fixtureControls?.classList.toggle('hidden', tokenRateLimitLive);
+      liveControls?.classList.toggle('hidden', !tokenRateLimitLive);
+      return;
+    }
+    content.classList.remove('hidden');
+    empty.classList.add('hidden');
+    const live = response?.source === 'live' || data.source === 'live';
+    if (source) source.textContent = live ? 'LIVE · OBSERVED REQUESTS' : 'SYNTHETIC FIXTURE';
+    const eyebrow = document.querySelector('#token-rate-limit-panel .eyebrow');
+    if (eyebrow) eyebrow.textContent = live ? 'Live distributed quota' : 'Opt-in quota demo';
+    fixtureControls?.classList.toggle('hidden', live);
+    liveControls?.classList.toggle('hidden', !live);
+    const quota = data.quota;
+    const summary = document.getElementById('token-rate-limit-summary');
+    const summaryItems = [
+      ['Principal', data.principal], ['Model', data.model], ['Quota key', quota.shared_key],
+      ['Quota policy', `${quota.configured_limit ?? quota.limit ?? '—'} tokens / rolling ${quota.window_seconds === 60 ? '1 minute' : `${quota.window_seconds ?? '—'} seconds`}`],
+      ['Backend', quota.backend],
+    ];
+    summary.innerHTML = summaryItems.map(([label, value]) => `<div class="token-summary-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`).join('');
+    for (const provider of ['west', 'central', 'east']) {
+      const count = data.provider_distribution?.[provider] || 0;
+      const target = document.getElementById(`token-provider-${provider}-count`);
+      if (target) target.textContent = `${count} ${count === 1 ? 'request' : 'requests'}`;
+    }
+    const rows = document.getElementById('token-rate-limit-requests');
+    rows.innerHTML = data.requests.map(item => {
+      const admitted = item.admission === 'admitted';
+      const unavailable = item.admission === 'unavailable';
+      const provider = item.route.provider_gateway || 'None — stopped at quota';
+      const trace = item.trace?.jaeger_url ? `<a class="token-trace-link" href="${escapeHtml(item.trace.jaeger_url)}" target="_blank" rel="noreferrer">${escapeHtml(item.trace.trace_id.slice(0, 8))}…</a>` : '—';
+      const quotaText = item.quota.limit === null || item.quota.limit === undefined
+        ? (item.quota.actual_tokens === null ? 'No quota headers' : `${item.quota.actual_tokens} actual tokens`)
+        : `${quotaValue(item.quota.remaining)} / ${item.quota.limit}`;
+      const retry = item.quota.retry_after_seconds === null || item.quota.retry_after_seconds === undefined ? '' : `<small>Retry-After ${item.quota.retry_after_seconds}s</small>`;
+      return `<tr><td>${item.sequence ?? '—'}</td><td><strong>${escapeHtml(item.principal)}</strong><small>${escapeHtml(item.model)}</small></td><td>${escapeHtml(item.consumer_gateway.replaceAll('-', ' '))}<small>Edge entry</small></td><td class="${admitted ? 'token-admitted' : 'token-denied'}">${admitted ? 'ADMITTED' : unavailable ? 'UNAVAILABLE' : 'DENIED'}${!admitted ? `<small class="token-no-hop">HTTP ${item.http.status} · no provider hop</small>` : ''}</td><td>${escapeHtml(quotaText)}${retry}</td><td>${escapeHtml(provider)}</td><td>${tokenPathHtml(item)}</td><td>${item.http.status}</td><td>${trace}</td></tr>`;
+    }).join('') || '<tr><td colspan="9" class="empty-state">No live requests in this displayed session. Choose Consumer Gateway A or B above; admitted traffic will be load balanced across Provider West, Provider Central, and Provider East.</td></tr>';
+  }
+
+  async function sendTokenRateLimitRequest(consumer) {
+    const status = document.getElementById('token-request-status');
+    const controls = [...document.querySelectorAll('#token-rate-limit-live-controls button')];
+    controls.forEach(button => { button.disabled = true; });
+    if (status) status.textContent = `Sending through Consumer Gateway ${consumer.toUpperCase()}…`;
+    try {
+      const response = await apiFetch('/v1/token-rate-limit/requests', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ consumer }),
+      });
+      renderTokenRateLimitResponse(response);
+      if (status) status.textContent = `HTTP ${response.record.http.status} · Consumer Gateway ${consumer.toUpperCase()}`;
+    } catch (error) {
+      if (status) status.textContent = error.message;
+    } finally {
+      controls.forEach(button => { button.disabled = false; });
+    }
+  }
+
+  async function clearTokenRateLimitResults() {
+    const response = await apiFetch('/v1/token-rate-limit/requests', { method: 'DELETE' });
+    renderTokenRateLimitResponse(response);
+    const status = document.getElementById('token-request-status');
+    if (status) status.textContent = 'Displayed results cleared; shared quota unchanged';
+  }
 
   async function fetchRequests({ append = false } = {}) {
     const params = new URLSearchParams({ limit: '25' });
@@ -245,12 +342,30 @@
 
   function renderCapabilities(capabilities) {
     requestCapabilities = capabilities;
+    tokenRateLimitEnabled = capabilities?.features?.tokenRateLimit === true;
+    tokenRateLimitLive = capabilities?.features?.tokenRateLimitLive === true;
+    document.body.classList.toggle('token-rate-limit-profile', tokenRateLimitLive);
+    document.getElementById('token-live-topology')?.classList.toggle('hidden', !tokenRateLimitLive);
+    if (tokenRateLimitLive) {
+      const title = document.querySelector('header h1');
+      const subtitle = document.querySelector('header .subtitle');
+      const sourceBadge = document.getElementById('source-badge');
+      const evidenceBadge = document.getElementById('evidence-badge');
+      if (title) title.textContent = 'Distributed Token Rate Limiting';
+      if (subtitle) subtitle.textContent = 'Shared quota enforcement with Grid-aware provider routing';
+      if (sourceBadge) { sourceBadge.textContent = 'TOKEN QUOTA'; sourceBadge.className = 'badge badge-source'; }
+      if (evidenceBadge) { evidenceBadge.textContent = 'LIVE'; evidenceBadge.className = 'badge badge-live'; }
+    }
     const chip = document.getElementById('capability-summary');
     if (!chip) return;
     const env = capabilities.environment;
     const generator = capabilities.capabilities.can_generate_requests;
-    chip.textContent = `${env.display_name} · ${generator.state === 'available' ? (env.mode === 'demo' ? 'SIMULATION ENABLED' : 'LIVE TARGET') : 'GENERATION UNAVAILABLE'}`;
+    chip.textContent = tokenRateLimitLive
+      ? 'Distributed token quota · LIVE TARGETS'
+      : `${env.display_name} · ${generator.state === 'available' ? (env.mode === 'demo' ? 'SIMULATION ENABLED' : 'LIVE TARGET') : 'GENERATION UNAVAILABLE'}`;
     chip.className = `data-quality-chip ${env.mode === 'demo' ? 'simulated' : ''}`;
+    if (tokenRateLimitEnabled) fetchTokenRateLimit().then(renderTokenRateLimitResponse).catch(error => renderTokenRateLimitResponse({ warning: error.message }));
+    else renderTokenRateLimitResponse({});
   }
 
   function connectRequestEvents() {
@@ -588,6 +703,7 @@
   }
 
   function updateSourceButtons() {
+    if (tokenRateLimitLive) return;
     document.querySelectorAll('.source-btn').forEach(btn => {
       btn.classList.toggle('active', btn.id === `btn-src-${currentDataSource}`);
     });
@@ -608,6 +724,7 @@
   }
 
   function updateModeBadge(status) {
+    if (tokenRateLimitLive) return;
     const badge = document.getElementById('evidence-badge');
     if (!badge) return;
     effectiveMode = status.mode;
@@ -1384,6 +1501,17 @@
     document.getElementById('replay-forward')?.addEventListener('click', () => { stopReplay(); setReplayPosition(Number(document.getElementById('history-scrubber')?.value || 0) + 10); });
     document.getElementById('replay-play')?.addEventListener('click', toggleReplay);
     document.getElementById('request-detail-close')?.addEventListener('click', () => document.getElementById('request-detail')?.classList.add('hidden'));
+    document.querySelectorAll('.token-state-btn').forEach(button => button.addEventListener('click', () => {
+      tokenRateLimitState = button.dataset.tokenState || 'recovered';
+      document.querySelectorAll('.token-state-btn').forEach(item => item.classList.toggle('active', item === button));
+      if (tokenRateLimitEnabled) fetchTokenRateLimit().then(renderTokenRateLimitResponse).catch(error => renderTokenRateLimitResponse({ warning: error.message }));
+    }));
+    document.getElementById('token-request-a')?.addEventListener('click', () => sendTokenRateLimitRequest('a'));
+    document.getElementById('token-request-b')?.addEventListener('click', () => sendTokenRateLimitRequest('b'));
+    document.getElementById('token-clear-results')?.addEventListener('click', () => clearTokenRateLimitResults().catch(error => {
+      const status = document.getElementById('token-request-status');
+      if (status) status.textContent = error.message;
+    }));
     connectRequestEvents();
     await refreshAll();
     refreshTimer = setInterval(refreshAll, REFRESH_INTERVAL);
