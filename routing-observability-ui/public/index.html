@@ -64,6 +64,67 @@
       <div class="request-pagination"><button id="request-older" class="secondary-btn" type="button" disabled>Load older</button><span id="request-page-status">0 requests</span></div>
     </section>
 
+    <!-- Explicitly gated token-rate-limit demo -->
+    <section id="token-rate-limit-panel" class="token-rate-limit-panel hidden" aria-labelledby="token-rate-limit-title">
+      <div class="explorer-heading">
+        <div>
+          <div class="eyebrow">Opt-in quota demo</div>
+          <h2 id="token-rate-limit-title">Shared token-rate limit</h2>
+          <p class="section-help">Live requests through two consumer gateways sharing one model quota. Admitted traffic selects a provider; denied traffic stops before routing.</p>
+        </div>
+        <span id="token-rate-limit-source" class="data-quality-chip">Disabled</span>
+      </div>
+      <div id="token-rate-limit-controls" class="token-rate-limit-controls" role="group" aria-label="Token-rate-limit fixture state">
+        <button class="secondary-btn token-state-btn active" data-token-state="recovered" type="button">Recovery</button>
+        <button class="secondary-btn token-state-btn" data-token-state="admitted" type="button">Admitted</button>
+        <button class="secondary-btn token-state-btn" data-token-state="exhausted" type="button">Exhausted</button>
+        <button class="secondary-btn token-state-btn" data-token-state="concurrent-race" type="button">Concurrent race</button>
+      </div>
+      <div id="token-rate-limit-live-controls" class="token-rate-limit-controls hidden" role="group" aria-label="Live token-rate-limit requests">
+        <button id="token-request-a" class="primary-btn" type="button">Request through Consumer Gateway A</button>
+        <button id="token-request-b" class="primary-btn token-consumer-b" type="button">Request through Consumer Gateway B</button>
+        <button id="token-clear-results" class="secondary-btn" type="button">Clear results</button>
+        <span id="token-request-status" class="generator-status" role="status">Ready</span>
+      </div>
+      <div id="token-live-topology" class="token-live-topology hidden" aria-label="Token-rate-limit live topology">
+        <div class="token-topology-stage">
+          <div class="token-topology-heading">
+            <span>Client requests</span>
+            <b aria-hidden="true">↓</b>
+            <span>Edge entry</span>
+          </div>
+          <div class="token-topology-pair">
+            <div class="token-topology-card consumer"><strong>Consumer Gateway A</strong><small>Edge entry</small></div>
+            <div class="token-topology-card consumer"><strong>Consumer Gateway B</strong><small>Edge entry</small></div>
+          </div>
+        </div>
+        <div class="token-topology-connector quota"><span>shared accounting</span></div>
+        <div class="token-topology-stage compact">
+          <div class="token-topology-card quota"><strong>Shared Valkey quota</strong><small>One Alice / model ledger</small></div>
+        </div>
+        <div class="token-topology-connector route"><span>quota admitted · intelligent_route</span></div>
+        <div class="token-topology-stage providers">
+          <span class="token-topology-label">Provider gateways from the Grid overlay</span>
+          <div class="token-topology-provider-grid">
+            <div class="token-topology-card provider"><strong>Provider West</strong><small>Cluster West · <span id="token-provider-west-count">0 requests</span></small></div>
+            <div class="token-topology-card provider"><strong>Provider Central</strong><small>Cluster Central · <span id="token-provider-central-count">0 requests</span></small></div>
+            <div class="token-topology-card provider"><strong>Provider East</strong><small>Cluster East · <span id="token-provider-east-count">0 requests</span></small></div>
+          </div>
+          <div class="token-grid-overlay-note"><strong>Grid overlay</strong><span>Same three provider candidates loaded by both consumers; no request-time Grid call.</span></div>
+        </div>
+      </div>
+      <div id="token-rate-limit-empty" class="token-rate-limit-empty hidden" role="status"></div>
+      <div id="token-rate-limit-content">
+        <div id="token-rate-limit-summary" class="token-rate-limit-summary"></div>
+        <div class="request-table-wrap">
+          <table class="request-table token-request-table">
+            <thead><tr><th>#</th><th>Principal / model</th><th>Edge entry</th><th>Admission</th><th>Quota</th><th>Selected provider</th><th>Request path</th><th>HTTP</th><th>Trace</th></tr></thead>
+            <tbody id="token-rate-limit-requests"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
     <section id="request-detail" class="request-detail-panel hidden" aria-live="polite">
       <div class="explorer-heading"><div><div class="eyebrow">Request detail</div><h2 id="request-detail-title">Select a request</h2></div><button id="request-detail-close" class="close-btn" type="button">Close</button></div>
       <div id="request-detail-content" class="request-detail-content"></div>

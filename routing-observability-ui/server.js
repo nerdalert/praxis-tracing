@@ -14,6 +14,36 @@ const app = express();
 app.use(express.json());
 app.use(express.static(join(__dirname, 'public')));
 
+function strictBoolean(name, defaultValue = false) {
+  const value = process.env[name];
+  if (value === undefined || value === '') return defaultValue;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  throw new Error(`${name} must be exactly true or false`);
+}
+
+const TOKEN_RATE_LIMIT_ENABLED = strictBoolean('TRACING_UI_TOKEN_RATE_LIMIT');
+const TOKEN_RATE_LIMIT_FIXTURE_MODE = process.env.TRACING_UI_FIXTURE_MODE || null;
+if (TOKEN_RATE_LIMIT_FIXTURE_MODE && TOKEN_RATE_LIMIT_FIXTURE_MODE !== 'token-rate-limit') {
+  throw new Error('TRACING_UI_FIXTURE_MODE must be token-rate-limit when set');
+}
+const TOKEN_RATE_LIMIT_FIXTURES = TOKEN_RATE_LIMIT_ENABLED && TOKEN_RATE_LIMIT_FIXTURE_MODE === 'token-rate-limit';
+const TOKEN_RATE_LIMIT_CONSUMERS = {
+  a: process.env.TRACING_UI_TOKEN_CONSUMER_A_URL || null,
+  b: process.env.TRACING_UI_TOKEN_CONSUMER_B_URL || null,
+};
+const TOKEN_RATE_LIMIT_MODEL = process.env.TRACING_UI_TOKEN_MODEL || 'Qwen/Qwen3-0.6B';
+const TOKEN_RATE_LIMIT_USERNAME = process.env.TRACING_UI_TOKEN_USERNAME || 'alice';
+const TOKEN_RATE_LIMIT_CONFIGURED_LIMIT = Number.parseInt(process.env.TRACING_UI_TOKEN_LIMIT || '60', 10);
+const TOKEN_RATE_LIMIT_WINDOW_SECONDS = Number.parseInt(process.env.TRACING_UI_TOKEN_WINDOW_SECONDS || '60', 10);
+const TOKEN_RATE_LIMIT_PASSWORD_FILE = process.env.TRACING_UI_TOKEN_PASSWORD_FILE || null;
+const TOKEN_RATE_LIMIT_PASSWORD = process.env.TRACING_UI_TOKEN_PASSWORD
+  || (TOKEN_RATE_LIMIT_PASSWORD_FILE ? readFileSync(TOKEN_RATE_LIMIT_PASSWORD_FILE, 'utf8').trim() : null);
+const TOKEN_RATE_LIMIT_HISTORY_LIMIT = 100;
+const TOKEN_RATE_LIMIT_LIVE = TOKEN_RATE_LIMIT_ENABLED
+  && !TOKEN_RATE_LIMIT_FIXTURES
+  && Boolean(TOKEN_RATE_LIMIT_CONSUMERS.a && TOKEN_RATE_LIMIT_CONSUMERS.b && TOKEN_RATE_LIMIT_PASSWORD);
+
 const PORT = parseInt(process.env.PORT || '3001', 10);
 const JAEGER_URL = process.env.JAEGER_URL || 'http://localhost:16686';
 // The server-side query endpoint and browser-visible Jaeger UI endpoint may
@@ -57,6 +87,228 @@ const liveGeneratedHistory = [];
 let demoRun = null;
 const eventClients = new Set();
 const replayJobs = new Map();
+const tokenRateLimitHistory = [];
+let tokenRateLimitSequence = 0;
+
+// This is the stable adapter contract for the future live OTel/HTTP source.
+// UI code consumes these normalized fields and does not depend on exporter-
+// specific attribute names.
+const TOKEN_RATE_LIMIT_CONTRACT = {
+  version: 'token-rate-limit.v1',
+  request: ['principal', 'model', 'consumer_gateway', 'admission', 'quota', 'route', 'http', 'trace'],
+  quota: ['backend', 'limit', 'used', 'remaining', 'reset_at', 'retry_after_seconds'],
+  route: ['provider_gateway', 'overlay_revision', 'hops'],
+  trace: ['trace_id', 'jaeger_url', 'spans'],
+};
+
+function rateLimitHeader(headers, name) {
+  const value = headers[name.toLowerCase()];
+  if (Array.isArray(value)) return value[0] ?? null;
+  return value ?? null;
+}
+
+function parseOptionalInteger(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number.parseInt(String(value), 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function tokenRateLimitRequest(consumer) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(TOKEN_RATE_LIMIT_CONSUMERS[consumer]);
+    const client = target.protocol === 'https:' ? https : http;
+    const payload = JSON.stringify({
+      model: TOKEN_RATE_LIMIT_MODEL,
+      messages: [{ role: 'user', content: `token-rate-limit-live-${tokenRateLimitSequence + 1}` }],
+      max_tokens: 1,
+    });
+    const request = client.request({
+      protocol: target.protocol,
+      hostname: target.hostname,
+      port: target.port || undefined,
+      path: new URL('/v1/chat/completions', target).pathname,
+      method: 'POST',
+      timeout: 30000,
+      rejectUnauthorized: target.protocol !== 'https:' || process.env.TRACING_UI_TOKEN_TLS_INSECURE !== 'true',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+        Authorization: `Basic ${Buffer.from(`${TOKEN_RATE_LIMIT_USERNAME}:${TOKEN_RATE_LIMIT_PASSWORD}`).toString('base64')}`,
+        'X-Model': TOKEN_RATE_LIMIT_MODEL,
+      },
+    }, response => {
+      let responseBody = '';
+      response.on('data', chunk => { responseBody += chunk; });
+      response.on('end', () => {
+        let actualTokens = null;
+        try {
+          actualTokens = JSON.parse(responseBody)?.usage?.total_tokens ?? null;
+        } catch {
+          // Error responses are not required to use the inference response schema.
+        }
+        resolve({ response, actualTokens });
+      });
+    });
+    request.on('error', reject);
+    request.on('timeout', () => request.destroy(new Error('token-rate-limit request timed out')));
+    request.end(payload);
+  });
+}
+
+async function createTokenRateLimitRecord(consumer) {
+  const startedAt = new Date().toISOString();
+  const { response, actualTokens } = await tokenRateLimitRequest(consumer);
+  tokenRateLimitSequence += 1;
+  const status = response.statusCode || 0;
+  const provider = response.headers['x-ai-demo-provider-gateway']
+    || response.headers['x-grid-combined-provider-gateway']
+    || response.headers['x-grid-llmd-provider-gateway']
+    || null;
+  const limit = parseOptionalInteger(rateLimitHeader(response.headers, 'x-ratelimit-limit'));
+  const remaining = parseOptionalInteger(rateLimitHeader(response.headers, 'x-ratelimit-remaining'));
+  const resetSeconds = parseOptionalInteger(rateLimitHeader(response.headers, 'x-ratelimit-reset'));
+  const retryAfter = parseOptionalInteger(rateLimitHeader(response.headers, 'retry-after'));
+  const admitted = status >= 200 && status < 300;
+  const unavailable = status === 503;
+  const record = {
+    request_id: `live-${tokenRateLimitSequence}`,
+    sequence: tokenRateLimitSequence,
+    principal: TOKEN_RATE_LIMIT_USERNAME,
+    model: TOKEN_RATE_LIMIT_MODEL,
+    consumer_gateway: `consumer-gateway-${consumer}`,
+    admission: admitted ? 'admitted' : unavailable ? 'unavailable' : 'denied',
+    quota: {
+      backend: 'Valkey (shared)',
+      limit,
+      used: null,
+      remaining,
+      reset_at: resetSeconds === null ? null : new Date(Date.now() + resetSeconds * 1000).toISOString(),
+      retry_after_seconds: retryAfter,
+      actual_tokens: actualTokens,
+    },
+    route: {
+      provider_gateway: provider,
+      overlay_revision: response.headers['x-grid-overlay-revision'] || null,
+      hops: admitted && provider
+        ? ['client', `consumer-gateway-${consumer}`, 'quota-admitted', provider, 'vcr-backend']
+        : ['client', `consumer-gateway-${consumer}`, unavailable ? 'quota-unavailable' : 'quota-denied'],
+    },
+    http: { status, method: 'POST', path: '/v1/chat/completions' },
+    trace: { trace_id: null, jaeger_url: null, spans: [] },
+    started_at: startedAt,
+    error: admitted ? null : {
+      type: unavailable ? 'quota_backend_unavailable' : 'quota_exhausted',
+      retry_after_seconds: retryAfter,
+    },
+  };
+  tokenRateLimitHistory.push(record);
+  if (tokenRateLimitHistory.length > TOKEN_RATE_LIMIT_HISTORY_LIMIT) tokenRateLimitHistory.shift();
+  return record;
+}
+
+function liveTokenRateLimitData() {
+  const providerDistribution = {};
+  const consumerDistribution = { 'consumer-gateway-a': 0, 'consumer-gateway-b': 0 };
+  for (const item of tokenRateLimitHistory) {
+    consumerDistribution[item.consumer_gateway] = (consumerDistribution[item.consumer_gateway] || 0) + 1;
+    if (item.route.provider_gateway) {
+      providerDistribution[item.route.provider_gateway] = (providerDistribution[item.route.provider_gateway] || 0) + 1;
+    }
+  }
+  return {
+    profile: 'token-rate-limit',
+    source: 'live',
+    principal: TOKEN_RATE_LIMIT_USERNAME,
+    model: TOKEN_RATE_LIMIT_MODEL,
+    quota: {
+      backend: 'Valkey (shared)',
+      configured_limit: TOKEN_RATE_LIMIT_CONFIGURED_LIMIT,
+      window_seconds: TOKEN_RATE_LIMIT_WINDOW_SECONDS,
+      shared_key: `${TOKEN_RATE_LIMIT_USERNAME}/${TOKEN_RATE_LIMIT_MODEL}`,
+    },
+    consumers: ['consumer-gateway-a', 'consumer-gateway-b'],
+    consumer_distribution: consumerDistribution,
+    provider_distribution: providerDistribution,
+    timeline: tokenRateLimitHistory.map(item => ({
+      at: item.started_at,
+      label: `${item.consumer_gateway} · HTTP ${item.http.status}`,
+      detail: item.route.provider_gateway || (item.admission === 'unavailable' ? 'Quota backend unavailable; no provider selected' : 'Quota denied; no provider selected'),
+      state: item.admission,
+    })),
+    requests: [...tokenRateLimitHistory].reverse(),
+  };
+}
+
+function tokenRateLimitFixture(state = 'recovered') {
+  const now = Date.now();
+  const iso = offset => new Date(now + offset).toISOString();
+  const request = (id, admission, remaining, provider, status, offset, traceId, extra = {}) => ({
+    request_id: id,
+    principal: 'alice',
+    model: 'canonical-model',
+    consumer_gateway: extra.consumer_gateway || 'consumer-a',
+    admission,
+    quota: {
+      backend: 'memory (shared)',
+      limit: 100,
+      used: 100 - remaining,
+      remaining,
+      reset_at: iso(60000),
+      retry_after_seconds: admission === 'denied' ? 60 : null,
+    },
+    route: {
+      provider_gateway: provider,
+      overlay_revision: provider ? 'overlay-20260818-0042' : null,
+      hops: provider ? ['consumer-gateway', 'quota-admission', 'intelligent_route', provider, 'vcr-backend'] : ['consumer-gateway', 'quota-admission'],
+    },
+    http: { status: status, method: 'POST', path: '/v1/chat/completions' },
+    trace: {
+      trace_id: traceId,
+      jaeger_url: `http://localhost:16686/trace/${traceId}`,
+      spans: provider ? ['http.request', 'quota.check', 'routing.select', 'provider.forward', 'vcr.inference'] : ['http.request', 'quota.check'],
+    },
+    started_at: iso(offset),
+    ...extra,
+  });
+  const admittedA = request('quota-001', 'admitted', 60, 'provider-a', 200, -240000, '11111111111111111111111111111111', { consumer_gateway: 'consumer-a' });
+  const admittedB = request('quota-002', 'admitted', 40, 'provider-b', 200, -180000, '22222222222222222222222222222222', { consumer_gateway: 'consumer-b' });
+  const denied = request('quota-003', 'denied', 0, null, 429, -120000, '33333333333333333333333333333333', {
+    consumer_gateway: 'consumer-a',
+    error: { type: 'quota_exhausted', message: 'shared token quota exhausted', retry_after_seconds: 60 },
+  });
+  const concurrent = request('quota-004', 'denied', 0, null, 429, -90000, '44444444444444444444444444444444', {
+    consumer_gateway: 'consumer-b',
+    concurrency: { contenders: 2, winner: 'quota-003', atomic_decision: true },
+    error: { type: 'quota_exhausted', message: 'concurrent request rejected after atomic quota check', retry_after_seconds: 60 },
+  });
+  const recovered = request('quota-005', 'admitted', 80, 'provider-c', 200, -10000, '55555555555555555555555555555555', {
+    consumer_gateway: 'consumer-b',
+    recovery: { previous_state: 'exhausted', trigger: 'shared window expired', capacity_restored: true },
+  });
+  const requests = state === 'admitted' ? [admittedA, admittedB]
+    : state === 'exhausted' ? [admittedA, admittedB, denied, concurrent]
+      : state === 'concurrent-race' ? [admittedA, admittedB, concurrent]
+        : [admittedA, admittedB, denied, concurrent, recovered];
+  const admitted = requests.filter(item => item.admission === 'admitted');
+  return {
+    version: 'v1',
+    profile: 'token-rate-limit',
+    state,
+    source: 'synthetic_fixture',
+    generated_at: new Date(now).toISOString(),
+    principal: 'alice',
+    model: 'canonical-model',
+    quota: { backend: 'memory (shared)', limit: 100, used: state === 'recovered' ? 20 : state === 'admitted' ? 60 : 100, remaining: state === 'recovered' ? 80 : state === 'admitted' ? 40 : 0, reset_at: iso(60000), shared_key: 'alice/canonical-model' },
+    consumers: ['consumer-a', 'consumer-b'],
+    provider_distribution: Object.fromEntries([...new Set(admitted.map(item => item.route.provider_gateway))].map(provider => [provider, admitted.filter(item => item.route.provider_gateway === provider).length])),
+    requests,
+    timeline: [
+      { at: iso(-240000), label: 'Shared window opened', detail: 'alice/canonical-model quota available', state: 'available' },
+      { at: iso(-120000), label: 'Quota exhausted', detail: 'Request denied before provider routing', state: 'exhausted' },
+      { at: iso(-10000), label: 'Window expired', detail: 'Shared capacity restored and routing resumed', state: 'recovered' },
+    ],
+  };
+}
 
 const SCORING_WEIGHTS = { locality: 3.0, queue_depth: 5.0 };
 
@@ -1607,6 +1859,11 @@ app.get('/api/v1/capabilities', async (_req, res) => {
   const state = (available, source, reason = null) => ({ state: available ? 'available' : 'unavailable', source, ...(reason ? { reason } : {}) });
   res.json({
     version: 'v1',
+    features: {
+      tokenRateLimit: TOKEN_RATE_LIMIT_ENABLED,
+      fixtureMode: TOKEN_RATE_LIMIT_ENABLED ? TOKEN_RATE_LIMIT_FIXTURE_MODE : null,
+      tokenRateLimitLive: TOKEN_RATE_LIMIT_LIVE,
+    },
     environment: {
       id: dataSource === 'vcr' ? 'grid-llmd-pool-metrics' : dataSource === 'combined' ? 'grid-combined-site' : 'grid-glb',
       display_name: dataSource === 'vcr' ? 'Grid llm-d pool metrics' : dataSource === 'combined' ? 'Grid combined site' : 'Grid GLB',
@@ -1625,6 +1882,52 @@ app.get('/api/v1/capabilities', async (_req, res) => {
     },
     semantics: { missing: '—', stale_metrics_are_not_zero: true, request_generation_is_always_visible: true },
   });
+});
+
+app.get('/api/v1/token-rate-limit', (req, res) => {
+  if (!TOKEN_RATE_LIMIT_ENABLED) {
+    return res.json({ version: 'v1', enabled: false, profile: 'token-rate-limit', data: null });
+  }
+  if (!TOKEN_RATE_LIMIT_FIXTURES) {
+    if (TOKEN_RATE_LIMIT_LIVE) {
+      return res.json({
+        version: 'v1', enabled: true, fixture_mode: null, source: 'live',
+        contract: TOKEN_RATE_LIMIT_CONTRACT, data: liveTokenRateLimitData(),
+      });
+    }
+    return res.json({
+      version: 'v1', enabled: true, profile: 'token-rate-limit', fixture_mode: null,
+      data: null,
+      warning: 'Token-rate-limit UI is enabled, but live consumer URLs and server-side credentials are not fully configured.',
+    });
+  }
+  const allowedStates = new Set(['admitted', 'exhausted', 'concurrent-race', 'recovered']);
+  const state = allowedStates.has(req.query.state) ? req.query.state : 'recovered';
+  return res.json({ enabled: true, fixture_mode: TOKEN_RATE_LIMIT_FIXTURE_MODE, contract: TOKEN_RATE_LIMIT_CONTRACT, data: tokenRateLimitFixture(state) });
+});
+
+app.post('/api/v1/token-rate-limit/requests', async (req, res) => {
+  if (!TOKEN_RATE_LIMIT_LIVE) {
+    return res.status(409).json({ error: 'Live token-rate-limit request generation is not configured' });
+  }
+  const consumer = req.body?.consumer;
+  if (consumer !== 'a' && consumer !== 'b') {
+    return res.status(400).json({ error: 'consumer must be a or b' });
+  }
+  try {
+    const record = await createTokenRateLimitRecord(consumer);
+    return res.status(201).json({ version: 'v1', source: 'live', record, data: liveTokenRateLimitData() });
+  } catch (error) {
+    return res.status(502).json({ error: `Consumer Gateway ${consumer.toUpperCase()} request failed: ${error.message}` });
+  }
+});
+
+app.delete('/api/v1/token-rate-limit/requests', (req, res) => {
+  if (!TOKEN_RATE_LIMIT_LIVE) {
+    return res.status(409).json({ error: 'Live token-rate-limit request generation is not configured' });
+  }
+  tokenRateLimitHistory.length = 0;
+  return res.json({ version: 'v1', source: 'live', cleared: true, data: liveTokenRateLimitData() });
 });
 
 app.get('/api/v1/requests', async (req, res) => {
