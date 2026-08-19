@@ -36,6 +36,45 @@ cd routing-observability-ui
 
 Open http://localhost:3001 in a browser.
 
+## Optional Basic Auth
+
+Authentication is disabled by default. To protect the UI and its API routes,
+set both variables; setting only one causes startup to fail:
+
+```console
+TRACING_UI_AUTH_USERNAME=praxis \
+TRACING_UI_AUTH_PASSWORD='choose-a-demo-password' \
+PORT=3001 node server.js
+```
+
+For Kubernetes or OpenShift, store the values in a Secret and inject them into
+the Deployment. Do not put the password in a ConfigMap, image, Route, browser
+JavaScript, or command history:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tracing-ui-auth
+type: Opaque
+stringData:
+  username: praxis
+  password: choose-a-demo-password
+```
+
+```yaml
+env:
+  - name: TRACING_UI_AUTH_USERNAME
+    valueFrom:
+      secretKeyRef: {name: tracing-ui-auth, key: username}
+  - name: TRACING_UI_AUTH_PASSWORD
+    valueFrom:
+      secretKeyRef: {name: tracing-ui-auth, key: password}
+```
+
+This protects the UI when it is exposed through an OpenShift Route. Keep
+Jaeger private or protect it independently at the same review boundary.
+
 For the real GLB tracing path, use the OTel-enabled Praxis AI fork:
 <https://github.com/nerdalert/ai/tree/grid-otel-demo>. The released Praxis
 image does not include the experimental tracing hooks used by that demo.

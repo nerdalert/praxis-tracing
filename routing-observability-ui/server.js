@@ -1,4 +1,5 @@
 import express from 'express';
+import { timingSafeEqual } from 'crypto';
 import { readFileSync, existsSync, readdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -11,6 +12,43 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const app = express();
+
+// Optional demo protection. Authentication is disabled unless both variables
+// are configured. The password is never included in responses or logs.
+const UI_AUTH_USERNAME = process.env.TRACING_UI_AUTH_USERNAME || null;
+const UI_AUTH_PASSWORD = process.env.TRACING_UI_AUTH_PASSWORD || null;
+if ((UI_AUTH_USERNAME && !UI_AUTH_PASSWORD) || (!UI_AUTH_USERNAME && UI_AUTH_PASSWORD)) {
+  throw new Error('TRACING_UI_AUTH_USERNAME and TRACING_UI_AUTH_PASSWORD must be configured together');
+}
+
+function basicAuthValid(header) {
+  if (!header?.startsWith('Basic ')) return false;
+  let decoded;
+  try {
+    decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
+  } catch {
+    return false;
+  }
+  const separator = decoded.indexOf(':');
+  if (separator < 0) return false;
+  const username = Buffer.from(decoded.slice(0, separator));
+  const password = Buffer.from(decoded.slice(separator + 1));
+  const expectedUsername = Buffer.from(UI_AUTH_USERNAME);
+  const expectedPassword = Buffer.from(UI_AUTH_PASSWORD);
+  return username.length === expectedUsername.length
+    && password.length === expectedPassword.length
+    && timingSafeEqual(username, expectedUsername)
+    && timingSafeEqual(password, expectedPassword);
+}
+
+if (UI_AUTH_USERNAME && UI_AUTH_PASSWORD) {
+  app.use((req, res, next) => {
+    if (basicAuthValid(req.headers.authorization)) return next();
+    res.set('WWW-Authenticate', 'Basic realm="Praxis Tracing"');
+    return res.status(401).send('Authentication required');
+  });
+}
+
 app.use(express.json());
 app.use(express.static(join(__dirname, 'public')));
 
