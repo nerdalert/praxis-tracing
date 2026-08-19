@@ -43,7 +43,7 @@ set both variables; setting only one causes startup to fail:
 
 ```console
 TRACING_UI_AUTH_USERNAME=praxis \
-TRACING_UI_AUTH_PASSWORD='choose-a-demo-password' \
+TRACING_UI_AUTH_PASSWORD='redhat123' \
 PORT=3001 node server.js
 ```
 
@@ -59,7 +59,7 @@ metadata:
 type: Opaque
 stringData:
   username: praxis
-  password: choose-a-demo-password
+  password: redhat123
 ```
 
 ```yaml
@@ -72,8 +72,14 @@ env:
       secretKeyRef: {name: tracing-ui-auth, key: password}
 ```
 
-This protects the UI when it is exposed through an OpenShift Route. Keep
-Jaeger private or protect it independently at the same review boundary.
+This protects the UI when it is exposed through an OpenShift Route.
+
+Jaeger is a separate application and does not consume these environment
+variables. For the demo, protect its public Route or Ingress with the same
+Secret (`praxis` / `redhat123`) using the platform's Basic Auth proxy or
+authentication middleware, or keep Jaeger private and expose it only through
+an authenticated port-forward. Do not add the password to the Jaeger image,
+Jaeger configuration, a ConfigMap, browser JavaScript, or a URL.
 
 For the real GLB tracing path, use the OTel-enabled Praxis AI fork:
 <https://github.com/nerdalert/ai/tree/grid-otel-demo>. The released Praxis
