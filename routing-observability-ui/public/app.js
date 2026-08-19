@@ -83,7 +83,8 @@
   function tokenPathHtml(item) {
     const labels = item.route?.hops || [];
     return `<div class="token-path ${item.admission === 'admitted' ? 'admitted' : 'stopped'}">${labels.map((label, index) => {
-      const chip = `<span class="token-path-chip">${escapeHtml(label.replaceAll('-', ' '))}</span>`;
+      const displayLabel = label === 'vllm-vcr' ? label : label.replaceAll('-', ' ');
+      const chip = `<span class="token-path-chip">${escapeHtml(displayLabel)}</span>`;
       return index === labels.length - 1 ? chip : `${chip}<span class="token-path-edge" aria-hidden="true">→</span>`;
     }).join('')}</div>`;
   }

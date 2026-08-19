@@ -74,6 +74,7 @@ const TOKEN_RATE_LIMIT_MODEL = process.env.TRACING_UI_TOKEN_MODEL || 'Qwen/Qwen3
 const TOKEN_RATE_LIMIT_USERNAME = process.env.TRACING_UI_TOKEN_USERNAME || 'alice';
 const TOKEN_RATE_LIMIT_CONFIGURED_LIMIT = Number.parseInt(process.env.TRACING_UI_TOKEN_LIMIT || '60', 10);
 const TOKEN_RATE_LIMIT_WINDOW_SECONDS = Number.parseInt(process.env.TRACING_UI_TOKEN_WINDOW_SECONDS || '60', 10);
+const TOKEN_RATE_LIMIT_BACKEND_LABEL = process.env.TRACING_UI_TOKEN_BACKEND_LABEL || 'vllm-vcr';
 const TOKEN_RATE_LIMIT_PASSWORD_FILE = process.env.TRACING_UI_TOKEN_PASSWORD_FILE || null;
 const TOKEN_RATE_LIMIT_PASSWORD = process.env.TRACING_UI_TOKEN_PASSWORD
   || (TOKEN_RATE_LIMIT_PASSWORD_FILE ? readFileSync(TOKEN_RATE_LIMIT_PASSWORD_FILE, 'utf8').trim() : null);
@@ -228,7 +229,7 @@ async function createTokenRateLimitRecord(consumer) {
       provider_gateway: provider,
       overlay_revision: response.headers['x-grid-overlay-revision'] || null,
       hops: admitted && provider
-        ? ['client', `consumer-gateway-${consumer}`, 'quota-admitted', provider, 'vcr-backend']
+        ? ['client', `consumer-gateway-${consumer}`, 'quota-admitted', provider, TOKEN_RATE_LIMIT_BACKEND_LABEL]
         : ['client', `consumer-gateway-${consumer}`, unavailable ? 'quota-unavailable' : 'quota-denied'],
     },
     http: { status, method: 'POST', path: '/v1/chat/completions' },
@@ -297,7 +298,7 @@ function tokenRateLimitFixture(state = 'recovered') {
     route: {
       provider_gateway: provider,
       overlay_revision: provider ? 'overlay-20260818-0042' : null,
-      hops: provider ? ['consumer-gateway', 'quota-admission', 'intelligent_route', provider, 'vcr-backend'] : ['consumer-gateway', 'quota-admission'],
+      hops: provider ? ['consumer-gateway', 'quota-admission', 'intelligent_route', provider, TOKEN_RATE_LIMIT_BACKEND_LABEL] : ['consumer-gateway', 'quota-admission'],
     },
     http: { status: status, method: 'POST', path: '/v1/chat/completions' },
     trace: {
