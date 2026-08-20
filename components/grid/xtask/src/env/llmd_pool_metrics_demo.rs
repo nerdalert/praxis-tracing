@@ -113,7 +113,7 @@ const DEFAULT_GATEWAY_IMAGE: &str = "praxis-ai:glb-demo";
 const DEFAULT_OPERATOR_IMAGE: &str = "grid-operator:llmd-pool-metrics-demo";
 
 /// Default EPP image reference required by this demo.
-const DEFAULT_EPP_IMAGE: &str = "ghcr.io/llm-d/llm-d-inference-scheduler:v0.8.0";
+const DEFAULT_EPP_IMAGE: &str = "ghcr.io/llm-d/llm-d-router-endpoint-picker:v0.9.0";
 
 /// Default vllm-vcr image reference required by this demo.
 const DEFAULT_VCR_IMAGE: &str = "ghcr.io/neuralmagic/vllm-vcr:vllm0.23";
@@ -763,11 +763,14 @@ fn proof_provenance(mtls: bool) -> ProofResult {
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
             if let Ok(metrics_text) = kubectl_exec_epp_metrics(cluster, mtls) {
-                let has_kv = metrics_text.contains("inference_pool_average_kv_cache_utilization")
+                let has_kv = metrics_text.contains("llm_d_epp_average_kv_cache_utilization")
+                    || metrics_text.contains("inference_pool_average_kv_cache_utilization")
                     || metrics_text.contains("llm_d_router_epp_average_kv_cache_utilization");
-                let has_queue = metrics_text.contains("inference_pool_average_queue_size")
+                let has_queue = metrics_text.contains("llm_d_epp_average_queue_size")
+                    || metrics_text.contains("inference_pool_average_queue_size")
                     || metrics_text.contains("llm_d_router_epp_average_queue_size");
-                let has_ready = metrics_text.contains("inference_pool_ready_pods")
+                let has_ready = metrics_text.contains("llm_d_epp_ready_endpoints")
+                    || metrics_text.contains("inference_pool_ready_pods")
                     || metrics_text.contains("llm_d_router_epp_ready_endpoints");
                 if has_kv && has_queue && has_ready {
                     observations.push(format!("{cluster}: all 3 EPP pool metrics present"));
@@ -1306,7 +1309,8 @@ fn scrape_epp_metrics(cluster: &str, mtls: bool) -> EppMetrics {
     let text = kubectl_exec_epp_metrics(cluster, mtls).unwrap_or_default();
 
     EppMetrics {
-        queue_size: extract_prom_value(&text, "inference_pool_average_queue_size")
+        queue_size: extract_prom_value(&text, "llm_d_epp_average_queue_size")
+            .or_else(|| extract_prom_value(&text, "inference_pool_average_queue_size"))
             .or_else(|| extract_prom_value(&text, "llm_d_router_epp_average_queue_size"))
             .unwrap_or(0.0),
     }
