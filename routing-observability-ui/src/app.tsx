@@ -1120,7 +1120,7 @@ export function App() {
     const onTokenUpdate = (event: Event) => {
       const record = (event as CustomEvent<RequestItem>).detail;
       if (record) {
-        void refresh().finally(() => setSelected(record));
+        void refresh().finally(() => selectRequest(record));
       } else {
         void refresh();
       }
