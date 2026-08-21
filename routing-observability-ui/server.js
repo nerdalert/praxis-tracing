@@ -1,5 +1,5 @@
 import express from 'express';
-import { timingSafeEqual } from 'crypto';
+import { createHmac, timingSafeEqual } from 'crypto';
 import { readFileSync, existsSync, readdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -17,18 +17,16 @@ const app = express();
 // are configured. The password is never included in responses or logs.
 const UI_AUTH_USERNAME = process.env.TRACING_UI_AUTH_USERNAME || null;
 const UI_AUTH_PASSWORD = process.env.TRACING_UI_AUTH_PASSWORD || null;
+const UI_LOGIN_PAGE = process.env.TRACING_UI_LOGIN_PAGE === 'true';
+const UI_SESSION_COOKIE = 'praxis_ui_session';
+const UI_SESSION_TTL_SECONDS = 3600;
 if ((UI_AUTH_USERNAME && !UI_AUTH_PASSWORD) || (!UI_AUTH_USERNAME && UI_AUTH_PASSWORD)) {
   throw new Error('TRACING_UI_AUTH_USERNAME and TRACING_UI_AUTH_PASSWORD must be configured together');
 }
 
 function basicAuthValid(header) {
   if (!header?.startsWith('Basic ')) return false;
-  let decoded;
-  try {
-    decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
-  } catch {
-    return false;
-  }
+  const decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
   const separator = decoded.indexOf(':');
   if (separator < 0) return false;
   const username = Buffer.from(decoded.slice(0, separator));
@@ -41,16 +39,70 @@ function basicAuthValid(header) {
     && timingSafeEqual(password, expectedPassword);
 }
 
+function parseCookies(header = '') {
+  return Object.fromEntries(header.split(';').map((part) => {
+    const separator = part.indexOf('=');
+    if (separator < 0) return [part.trim(), ''];
+    return [part.slice(0, separator).trim(), decodeURIComponent(part.slice(separator + 1).trim())];
+  }).filter(([key]) => key));
+}
+
+function sessionToken(username, expires) {
+  const payload = `${username}.${expires}`;
+  const signature = createHmac('sha256', UI_AUTH_PASSWORD).update(payload).digest('base64url');
+  return `${Buffer.from(payload).toString('base64url')}.${signature}`;
+}
+
+function sessionValid(header) {
+  if (!UI_LOGIN_PAGE || !UI_AUTH_USERNAME || !UI_AUTH_PASSWORD) return false;
+  const token = parseCookies(header)[UI_SESSION_COOKIE];
+  if (!token) return false;
+  const [encoded, signature] = token.split('.');
+  if (!encoded || !signature) return false;
+  let payload;
+  try { payload = Buffer.from(encoded, 'base64url').toString('utf8'); } catch { return false; }
+  const [username, expiresText] = payload.split('.');
+  const expires = Number(expiresText);
+  const expected = sessionToken(username, expires).split('.')[1];
+  return username === UI_AUTH_USERNAME && Number.isSafeInteger(expires)
+    && expires > Math.floor(Date.now() / 1000)
+    && signature.length === expected.length
+    && timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+}
+
+const LOGIN_PAGE_HTML = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Praxis Tracing Login</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f5f5f5;color:#171717;font:15px system-ui,sans-serif}.card{width:min(360px,calc(100% - 40px));padding:28px;background:#fff;border:1px solid #d7d7d7;border-top:3px solid #e11;box-shadow:0 8px 24px #0001}h1{margin:0 0 8px;font-size:24px}p{color:#666;line-height:1.45}label{display:grid;gap:6px;margin:14px 0;font-weight:600}input{box-sizing:border-box;padding:10px;border:1px solid #aaa;font:inherit}button{width:100%;margin-top:8px;padding:11px;border:0;background:#e11;color:#fff;font-weight:700;cursor:pointer}#error{min-height:20px;color:#b00020}</style></head><body><main class="card"><h1>Praxis Tracing</h1><p>Sign in to view the live quota demonstration.</p><form id="login"><label>Username<input name="username" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><div id="error"></div><button>Sign in</button></form></main><script>document.querySelector('#login').addEventListener('submit',async(e)=>{e.preventDefault();const f=new FormData(e.currentTarget);const r=await fetch('/api/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:f.get('username'),password:f.get('password')})});if(r.ok)location.href='/';else document.querySelector('#error').textContent='Invalid username or password.'})</script></body></html>`;
+
 if (UI_AUTH_USERNAME && UI_AUTH_PASSWORD) {
   app.use((req, res, next) => {
-    if (basicAuthValid(req.headers.authorization)) return next();
+    if (basicAuthValid(req.headers.authorization) || sessionValid(req.headers.cookie)) return next();
+    if (UI_LOGIN_PAGE && req.path === '/login') return next();
+    if (UI_LOGIN_PAGE && (req.path === '/api/login' || req.path === '/api/logout')) return next();
+    if (UI_LOGIN_PAGE && !req.path.startsWith('/api/')) return res.redirect('/login');
     res.set('WWW-Authenticate', 'Basic realm="Praxis Tracing"');
     return res.status(401).send('Authentication required');
   });
 }
 
 app.use(express.json());
-app.use(express.static(join(__dirname, 'public')));
+if (UI_LOGIN_PAGE) {
+  app.get('/login', (_req, res) => res.type('html').send(LOGIN_PAGE_HTML));
+  app.post('/api/login', (req, res) => {
+    if (req.body?.username !== UI_AUTH_USERNAME || req.body?.password !== UI_AUTH_PASSWORD) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    const expires = Math.floor(Date.now() / 1000) + UI_SESSION_TTL_SECONDS;
+    res.set('Set-Cookie', `${UI_SESSION_COOKIE}=${encodeURIComponent(sessionToken(UI_AUTH_USERNAME, expires))}; Path=/; Max-Age=${UI_SESSION_TTL_SECONDS}; HttpOnly; Secure; SameSite=Lax`);
+    return res.json({ authenticated: true });
+  });
+  app.post('/api/logout', (_req, res) => {
+    res.set('Set-Cookie', `${UI_SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`);
+    return res.json({ authenticated: false });
+  });
+}
+// Prefer the compiled React application when present. The legacy public
+// frontend remains as a safe development fallback until the first build.
+const distRoot = join(__dirname, 'dist');
+app.use(express.static(existsSync(join(distRoot, 'index.html')) ? distRoot : join(__dirname, 'public')));
 
 function strictBoolean(name, defaultValue = false) {
   const value = process.env[name];
@@ -74,14 +126,40 @@ const TOKEN_RATE_LIMIT_MODEL = process.env.TRACING_UI_TOKEN_MODEL || 'Qwen/Qwen3
 const TOKEN_RATE_LIMIT_USERNAME = process.env.TRACING_UI_TOKEN_USERNAME || 'alice';
 const TOKEN_RATE_LIMIT_CONFIGURED_LIMIT = Number.parseInt(process.env.TRACING_UI_TOKEN_LIMIT || '60', 10);
 const TOKEN_RATE_LIMIT_WINDOW_SECONDS = Number.parseInt(process.env.TRACING_UI_TOKEN_WINDOW_SECONDS || '60', 10);
+const TOKEN_RATE_LIMIT_MIN_TOKENS = Number.parseInt(process.env.TRACING_UI_TOKEN_MIN_TOKENS || '1', 10);
+const TOKEN_RATE_LIMIT_MAX_TOKENS = Number.parseInt(process.env.TRACING_UI_TOKEN_MAX_TOKENS || '5', 10);
 const TOKEN_RATE_LIMIT_BACKEND_LABEL = process.env.TRACING_UI_TOKEN_BACKEND_LABEL || 'vllm-vcr';
 const TOKEN_RATE_LIMIT_PASSWORD_FILE = process.env.TRACING_UI_TOKEN_PASSWORD_FILE || null;
 const TOKEN_RATE_LIMIT_PASSWORD = process.env.TRACING_UI_TOKEN_PASSWORD
   || (TOKEN_RATE_LIMIT_PASSWORD_FILE ? readFileSync(TOKEN_RATE_LIMIT_PASSWORD_FILE, 'utf8').trim() : null);
+const TOKEN_RATE_LIMIT_MULTI_QUOTA = strictBoolean('TRACING_UI_TOKEN_MULTI_QUOTA');
+const TOKEN_RATE_LIMIT_APPS_FILE = process.env.TRACING_UI_TOKEN_APPS_FILE || null;
+function loadTokenRateLimitApps() {
+  if (!TOKEN_RATE_LIMIT_MULTI_QUOTA || !TOKEN_RATE_LIMIT_APPS_FILE) return [];
+  if (!existsSync(TOKEN_RATE_LIMIT_APPS_FILE)) throw new Error('TRACING_UI_TOKEN_APPS_FILE does not exist');
+  let parsed;
+  try { parsed = JSON.parse(readFileSync(TOKEN_RATE_LIMIT_APPS_FILE, 'utf8')); } catch (error) {
+    throw new Error(`TRACING_UI_TOKEN_APPS_FILE is not valid JSON: ${error.message}`);
+  }
+  if (!Array.isArray(parsed) || parsed.length !== 3) throw new Error('TRACING_UI_TOKEN_APPS_FILE must contain exactly three applications');
+  return parsed.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || !/^[a-z][a-z0-9-]{0,31}$/.test(entry.id)
+      || !/^[a-z][a-z0-9-]{0,31}$/.test(entry.username) || typeof entry.model !== 'string' || entry.model.length < 1 || entry.model.length > 128
+      || !/^#[0-9a-f]{6}$/i.test(entry.color || '')) throw new Error(`Invalid application entry at index ${index}`);
+    const password = entry.password || (entry.passwordFile && existsSync(entry.passwordFile) ? readFileSync(entry.passwordFile, 'utf8').trim() : null);
+    const limit = Number.parseInt(entry.limit, 10);
+    const windowSeconds = Number.parseInt(entry.windowSeconds, 10);
+    const estimateTokens = Number.parseInt(entry.estimateTokens ?? '5', 10);
+    if (!password || password.length > 256 || !Number.isInteger(limit) || limit <= 0 || !Number.isInteger(windowSeconds) || windowSeconds <= 0 || !Number.isInteger(estimateTokens) || estimateTokens <= 0 || estimateTokens > 256) throw new Error(`Application ${entry.id} has invalid quota credentials or bounds`);
+    return { id: entry.id, name: String(entry.name || entry.id).slice(0, 64), username: entry.username, password, model: entry.model, color: entry.color, limit, windowSeconds, estimateTokens };
+  });
+}
+const TOKEN_RATE_LIMIT_APPS = loadTokenRateLimitApps();
 const TOKEN_RATE_LIMIT_HISTORY_LIMIT = 100;
 const TOKEN_RATE_LIMIT_LIVE = TOKEN_RATE_LIMIT_ENABLED
   && !TOKEN_RATE_LIMIT_FIXTURES
-  && Boolean(TOKEN_RATE_LIMIT_CONSUMERS.a && TOKEN_RATE_LIMIT_CONSUMERS.b && TOKEN_RATE_LIMIT_PASSWORD);
+  && Boolean(TOKEN_RATE_LIMIT_CONSUMERS.a && TOKEN_RATE_LIMIT_CONSUMERS.b
+    && (TOKEN_RATE_LIMIT_MULTI_QUOTA ? TOKEN_RATE_LIMIT_APPS.length === 3 : TOKEN_RATE_LIMIT_PASSWORD));
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 const JAEGER_URL = process.env.JAEGER_URL || 'http://localhost:16686';
@@ -119,7 +197,15 @@ let vcrReadiness = { expires: 0, available: false, reason: 'Not checked yet' };
 
 let currentMode = 'auto'; // auto, live, demo
 let demoScenario = 'baseline';
-let dataSource = 'glb'; // glb, vcr, combined
+// Deployment profiles select the live source at startup.  The llm-d/token
+// rate-limit deployment must not boot into the unrelated GLB view.
+const configuredProfile = process.env.TRACING_UI_PROFILE || null;
+const TOKEN_RATE_LIMIT_PROFILE = configuredProfile === 'token-rate-limit';
+let dataSource = TOKEN_RATE_LIMIT_PROFILE || configuredProfile === 'llmd'
+  ? 'vcr'
+  : configuredProfile === 'combined'
+    ? 'combined'
+    : 'glb'; // glb, vcr, combined
 let requestJob = null;
 let loadJob = null;
 const liveGeneratedHistory = [];
@@ -152,14 +238,16 @@ function parseOptionalInteger(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function tokenRateLimitRequest(consumer) {
+function tokenRateLimitRequest(consumer, appConfig = null) {
   return new Promise((resolve, reject) => {
     const target = new URL(TOKEN_RATE_LIMIT_CONSUMERS[consumer]);
     const client = target.protocol === 'https:' ? https : http;
+    const requestedTokens = TOKEN_RATE_LIMIT_MIN_TOKENS
+      + Math.floor(Math.random() * (TOKEN_RATE_LIMIT_MAX_TOKENS - TOKEN_RATE_LIMIT_MIN_TOKENS + 1));
     const payload = JSON.stringify({
-      model: TOKEN_RATE_LIMIT_MODEL,
+      model: appConfig?.model || TOKEN_RATE_LIMIT_MODEL,
       messages: [{ role: 'user', content: `token-rate-limit-live-${tokenRateLimitSequence + 1}` }],
-      max_tokens: 1,
+      max_tokens: requestedTokens,
     });
     const request = client.request({
       protocol: target.protocol,
@@ -172,8 +260,8 @@ function tokenRateLimitRequest(consumer) {
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(payload),
-        Authorization: `Basic ${Buffer.from(`${TOKEN_RATE_LIMIT_USERNAME}:${TOKEN_RATE_LIMIT_PASSWORD}`).toString('base64')}`,
-        'X-Model': TOKEN_RATE_LIMIT_MODEL,
+        Authorization: `Basic ${Buffer.from(`${appConfig?.username || TOKEN_RATE_LIMIT_USERNAME}:${appConfig?.password || TOKEN_RATE_LIMIT_PASSWORD}`).toString('base64')}`,
+        'X-Model': appConfig?.model || TOKEN_RATE_LIMIT_MODEL,
       },
     }, response => {
       let responseBody = '';
@@ -185,7 +273,7 @@ function tokenRateLimitRequest(consumer) {
         } catch {
           // Error responses are not required to use the inference response schema.
         }
-        resolve({ response, actualTokens });
+        resolve({ response, actualTokens, requestedTokens });
       });
     });
     request.on('error', reject);
@@ -194,9 +282,9 @@ function tokenRateLimitRequest(consumer) {
   });
 }
 
-async function createTokenRateLimitRecord(consumer) {
+async function createTokenRateLimitRecord(consumer, appConfig = null) {
   const startedAt = new Date().toISOString();
-  const { response, actualTokens } = await tokenRateLimitRequest(consumer);
+  const { response, actualTokens, requestedTokens } = await tokenRateLimitRequest(consumer, appConfig);
   tokenRateLimitSequence += 1;
   const status = response.statusCode || 0;
   const provider = response.headers['x-ai-demo-provider-gateway']
@@ -209,11 +297,15 @@ async function createTokenRateLimitRecord(consumer) {
   const retryAfter = parseOptionalInteger(rateLimitHeader(response.headers, 'retry-after'));
   const admitted = status >= 200 && status < 300;
   const unavailable = status === 503;
+  const reservationEstimate = appConfig?.estimateTokens || 5;
+  const settlementAdjustment = actualTokens === null ? null : reservationEstimate - actualTokens;
   const record = {
     request_id: `live-${tokenRateLimitSequence}`,
     sequence: tokenRateLimitSequence,
     principal: TOKEN_RATE_LIMIT_USERNAME,
-    model: TOKEN_RATE_LIMIT_MODEL,
+    model: appConfig?.model || TOKEN_RATE_LIMIT_MODEL,
+    application: appConfig?.id || null,
+    color: appConfig?.color || null,
     consumer_gateway: `consumer-gateway-${consumer}`,
     admission: admitted ? 'admitted' : unavailable ? 'unavailable' : 'denied',
     quota: {
@@ -223,8 +315,16 @@ async function createTokenRateLimitRecord(consumer) {
       remaining,
       reset_at: resetSeconds === null ? null : new Date(Date.now() + resetSeconds * 1000).toISOString(),
       retry_after_seconds: retryAfter,
+      requested_tokens: requestedTokens,
       actual_tokens: actualTokens,
+      reservation_estimate: reservationEstimate,
+      settlement: actualTokens === null ? 'conservative_estimate'
+        : settlementAdjustment > 0 ? 'refund'
+          : settlementAdjustment < 0 ? 'overage' : 'exact',
+      refund_tokens: settlementAdjustment > 0 ? settlementAdjustment : 0,
+      overage_tokens: settlementAdjustment < 0 ? Math.abs(settlementAdjustment) : 0,
     },
+    requested_tokens: requestedTokens,
     route: {
       provider_gateway: provider,
       overlay_revision: response.headers['x-grid-overlay-revision'] || null,
@@ -242,6 +342,9 @@ async function createTokenRateLimitRecord(consumer) {
   };
   tokenRateLimitHistory.push(record);
   if (tokenRateLimitHistory.length > TOKEN_RATE_LIMIT_HISTORY_LIMIT) tokenRateLimitHistory.shift();
+  record.principal = appConfig?.username || TOKEN_RATE_LIMIT_USERNAME;
+  record.quota.configured_limit = appConfig?.limit || TOKEN_RATE_LIMIT_CONFIGURED_LIMIT;
+  record.quota.window_seconds = appConfig?.windowSeconds || TOKEN_RATE_LIMIT_WINDOW_SECONDS;
   return record;
 }
 
@@ -254,16 +357,43 @@ function liveTokenRateLimitData() {
       providerDistribution[item.route.provider_gateway] = (providerDistribution[item.route.provider_gateway] || 0) + 1;
     }
   }
+  const apps = TOKEN_RATE_LIMIT_APPS.map(app => {
+    const items = tokenRateLimitHistory.filter(item => item.application === app.id);
+    const latest = items.at(-1);
+    const windowStart = Date.now() - app.windowSeconds * 1000;
+    const activeItems = items.filter(item => Date.parse(item.started_at) >= windowStart);
+    const used = activeItems.reduce((total, item) => total + (item.quota.actual_tokens || 0), 0);
+    const earliestExpiry = activeItems.map(item => Date.parse(item.started_at) + app.windowSeconds * 1000).filter(Number.isFinite).sort((a, b) => a - b)[0] || null;
+    return { id: app.id, name: app.name, username: app.username, model: app.model, color: app.color, limit: app.limit, estimate_tokens: app.estimateTokens, window_seconds: app.windowSeconds, used, raw_remaining: Math.max(0, app.limit - used), remaining: latest?.quota.remaining ?? Math.max(0, app.limit - used), next_expiry: latest?.quota.reset_at || (earliestExpiry ? new Date(earliestExpiry).toISOString() : null), admitted: items.filter(item => item.admission === 'admitted').length, denied: items.filter(item => item.admission === 'denied').length };
+  });
   return {
     profile: 'token-rate-limit',
     source: 'live',
     principal: TOKEN_RATE_LIMIT_USERNAME,
     model: TOKEN_RATE_LIMIT_MODEL,
+    multi_quota: TOKEN_RATE_LIMIT_MULTI_QUOTA,
+    apps,
     quota: {
       backend: 'Valkey (shared)',
       configured_limit: TOKEN_RATE_LIMIT_CONFIGURED_LIMIT,
       window_seconds: TOKEN_RATE_LIMIT_WINDOW_SECONDS,
       shared_key: `${TOKEN_RATE_LIMIT_USERNAME}/${TOKEN_RATE_LIMIT_MODEL}`,
+    },
+    policy: {
+      algorithm: 'sliding_window',
+      principal: TOKEN_RATE_LIMIT_USERNAME,
+      model: TOKEN_RATE_LIMIT_MODEL,
+      window_seconds: TOKEN_RATE_LIMIT_WINDOW_SECONDS,
+      capacity_tokens: TOKEN_RATE_LIMIT_CONFIGURED_LIMIT,
+      accounting: 'total_tokens',
+      request_token_range: [TOKEN_RATE_LIMIT_MIN_TOKENS, TOKEN_RATE_LIMIT_MAX_TOKENS],
+      max_tokens_per_request: TOKEN_RATE_LIMIT_MAX_TOKENS,
+      backend: 'Valkey (shared)',
+      unsupported_algorithms: {
+        token_bucket: 'Not implemented',
+        fixed_window: 'Not implemented',
+        calendar_window: 'Not implemented',
+      },
     },
     consumers: ['consumer-gateway-a', 'consumer-gateway-b'],
     consumer_distribution: consumerDistribution,
@@ -338,6 +468,12 @@ function tokenRateLimitFixture(state = 'recovered') {
     principal: 'alice',
     model: 'canonical-model',
     quota: { backend: 'memory (shared)', limit: 100, used: state === 'recovered' ? 20 : state === 'admitted' ? 60 : 100, remaining: state === 'recovered' ? 80 : state === 'admitted' ? 40 : 0, reset_at: iso(60000), shared_key: 'alice/canonical-model' },
+    policy: {
+      algorithm: 'sliding_window', principal: 'alice', model: 'canonical-model',
+      window_seconds: 60, capacity_tokens: 100, backend: 'memory (shared)',
+      accounting: 'total_tokens',
+      unsupported_algorithms: { token_bucket: 'Not implemented', fixed_window: 'Not implemented', calendar_window: 'Not implemented' },
+    },
     consumers: ['consumer-a', 'consumer-b'],
     provider_distribution: Object.fromEntries([...new Set(admitted.map(item => item.route.provider_gateway))].map(provider => [provider, admitted.filter(item => item.route.provider_gateway === provider).length])),
     requests,
@@ -980,6 +1116,38 @@ function loadOverlayFromFile() {
   }
 }
 
+function tokenOverlayProviders() {
+  const overlay = loadOverlayFromFile();
+  const candidates = overlay?.overlay?.candidates || overlay?.candidates;
+  if (!Array.isArray(candidates)) return null;
+  const hits = new Map();
+  for (const item of tokenRateLimitHistory) {
+    const provider = item.route?.provider_gateway;
+    if (provider) hits.set(provider, (hits.get(provider) || 0) + 1);
+  }
+  return candidates.slice(0, 3).map((candidate, index) => {
+    const identity = [candidate.site, candidate.cluster, candidate.name, candidate.stable_id]
+      .filter(Boolean);
+    const observedHits = identity.reduce((count, key) => count + (hits.get(key) || 0), 0);
+    return {
+      id: candidate.stable_id || candidate.cluster || candidate.site || `provider-${index}`,
+      name: candidate.name || candidate.site,
+      site: candidate.site || null,
+      cluster: candidate.cluster || null,
+      stable_id: candidate.stable_id || null,
+      admission_state: candidate.admission_state || null,
+      selection_group: candidate.selection_group ?? 0,
+      selection_tier: candidate.selection_tier || null,
+      healthy: candidate.fresh !== false && candidate.admission_state !== 'excluded',
+      rank: candidate.rank ?? index,
+      score: typeof candidate.score === 'number' ? candidate.score : null,
+      queue_depth: { value: observedHits },
+      request_count: observedHits,
+      pressure: 'normal',
+    };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Demo mode helpers
 // ---------------------------------------------------------------------------
@@ -1202,7 +1370,9 @@ app.get('/api/status', async (_req, res) => {
   const vcrEvidenceAvailable = !!VCR_EVIDENCE_DIR && existsSync(VCR_EVIDENCE_DIR);
   const vcrAvailable = !!liveVcr || vcrEvidenceAvailable;
   const glbAvailable = dataSource === 'glb' ? (await getGlbReadiness()).available : false;
-  const sourceLabel = dataSource === 'glb'
+  const sourceLabel = TOKEN_RATE_LIMIT_LIVE
+    ? 'LIVE TOKEN QUOTA'
+    : dataSource === 'glb'
     ? (effectiveMode === 'demo' ? 'MOCK DATA' : effectiveMode === 'live' && glbAvailable ? 'LIVE PRAXIS / GLB' : 'UNAVAILABLE')
     : dataSource === 'vcr'
     ? (vcrAvailable ? 'LIVE EPP / VCR' : 'UNAVAILABLE')
@@ -1217,7 +1387,7 @@ app.get('/api/status', async (_req, res) => {
     scenario: effectiveMode === 'demo' ? demoScenario : null,
     data_source: dataSource,
     source_label: sourceLabel,
-    vcr_available: vcrAvailable,
+    vcr_available: vcrAvailable || TOKEN_RATE_LIMIT_LIVE,
     vcr_mode: liveVcr ? 'live' : vcrEvidenceAvailable ? 'evidence' : 'unavailable',
   });
 });
@@ -1339,6 +1509,26 @@ app.get('/api/overlay', (_req, res) => {
 });
 
 app.get('/api/providers', async (_req, res) => {
+  if (TOKEN_RATE_LIMIT_PROFILE && TOKEN_RATE_LIMIT_LIVE) {
+    const providers = tokenOverlayProviders();
+    if (providers) {
+      const overlay = loadOverlayFromFile();
+      return res.json({
+        mode: 'live',
+        scoring_strategy: 'noMetrics',
+        selection_mode: 'roundRobin',
+        providers,
+        overlay_revision: overlay?.revision?.value || null,
+        generated_at: overlay?.overlay?.generated_at || null,
+      });
+    }
+    return res.json({
+      mode: 'unavailable',
+      scoring_strategy: null,
+      providers: [],
+      warning: 'The accepted token-quota routing overlay is not available.',
+    });
+  }
   const jaegerUp = await isJaegerReachable();
   const effectiveMode = currentMode === 'auto' ? (jaegerUp ? 'live' : ALLOW_SIMULATION ? 'demo' : 'unavailable') : currentMode;
   const resolvedMode = effectiveMode === 'live' && !jaegerUp ? (currentMode === 'auto' && ALLOW_SIMULATION ? 'demo' : 'unavailable') : effectiveMode;
@@ -1588,14 +1778,17 @@ app.get('/api/source', (_req, res) => {
   res.json({
     source: dataSource,
     available: {
-      glb: true,
-      vcr: !!VCR_EVIDENCE_DIR && existsSync(VCR_EVIDENCE_DIR),
-      combined: true,
+      glb: !TOKEN_RATE_LIMIT_PROFILE,
+      vcr: true,
+      combined: !TOKEN_RATE_LIMIT_PROFILE,
     },
   });
 });
 
 app.post('/api/source', (req, res) => {
+  if (TOKEN_RATE_LIMIT_PROFILE) {
+    return res.status(409).json({ error: 'source switching is disabled in the token-rate-limit profile' });
+  }
   const { source } = req.body;
   if (!['glb', 'vcr', 'combined'].includes(source)) {
     return res.status(400).json({ error: 'source must be glb, vcr, or combined' });
@@ -1902,11 +2095,14 @@ app.get('/api/v1/capabilities', async (_req, res) => {
       tokenRateLimit: TOKEN_RATE_LIMIT_ENABLED,
       fixtureMode: TOKEN_RATE_LIMIT_ENABLED ? TOKEN_RATE_LIMIT_FIXTURE_MODE : null,
       tokenRateLimitLive: TOKEN_RATE_LIMIT_LIVE,
+      tokenRateLimitMultiQuota: TOKEN_RATE_LIMIT_LIVE && TOKEN_RATE_LIMIT_MULTI_QUOTA,
     },
     environment: {
       id: dataSource === 'vcr' ? 'grid-llmd-pool-metrics' : dataSource === 'combined' ? 'grid-combined-site' : 'grid-glb',
       display_name: dataSource === 'vcr' ? 'Grid llm-d pool metrics' : dataSource === 'combined' ? 'Grid combined site' : 'Grid GLB',
-      profile: dataSource === 'vcr' ? 'llmd_pool' : dataSource === 'combined' ? 'combined_site' : 'glb',
+      profile: TOKEN_RATE_LIMIT_PROFILE
+        ? 'token_rate_limit'
+        : dataSource === 'vcr' ? 'llmd_pool' : dataSource === 'combined' ? 'combined_site' : 'glb',
       mode: simulated ? 'demo' : live && jaegerReachable ? 'live' : 'partial',
       detected_at: new Date().toISOString(),
     },
@@ -1953,8 +2149,10 @@ app.post('/api/v1/token-rate-limit/requests', async (req, res) => {
   if (consumer !== 'a' && consumer !== 'b') {
     return res.status(400).json({ error: 'consumer must be a or b' });
   }
+  const appConfig = TOKEN_RATE_LIMIT_MULTI_QUOTA ? TOKEN_RATE_LIMIT_APPS.find(entry => entry.id === req.body?.app) : null;
+  if (TOKEN_RATE_LIMIT_MULTI_QUOTA && !appConfig) return res.status(400).json({ error: 'app must identify one configured application' });
   try {
-    const record = await createTokenRateLimitRecord(consumer);
+    const record = await createTokenRateLimitRecord(consumer, appConfig);
     return res.status(201).json({ version: 'v1', source: 'live', record, data: liveTokenRateLimitData() });
   } catch (error) {
     return res.status(502).json({ error: `Consumer Gateway ${consumer.toUpperCase()} request failed: ${error.message}` });
@@ -2593,6 +2791,13 @@ app.get('/api/vcr/timeline', async (req, res) => {
   const events = vcrTimelineFromEvidence(evidence);
   res.json({ mode: 'replay', source: 'vcr-epp', events });
 });
+
+// The React build owns browser routes; API misses must remain API misses.
+const spaIndex = join(distRoot, 'index.html');
+app.use('/api', (_req, res) => res.status(404).json({ error: 'API route not found' }));
+if (existsSync(spaIndex)) {
+  app.get(/^(?!\/api(?:\/|$)).*/, (_req, res) => res.sendFile(spaIndex));
+}
 
 // ---------------------------------------------------------------------------
 // Start

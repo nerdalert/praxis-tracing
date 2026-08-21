@@ -83,7 +83,7 @@
   function tokenPathHtml(item) {
     const labels = item.route?.hops || [];
     return `<div class="token-path ${item.admission === 'admitted' ? 'admitted' : 'stopped'}">${labels.map((label, index) => {
-      const displayLabel = label === 'vllm-vcr' ? label : label.replaceAll('-', ' ');
+      const displayLabel = String(label).replace(/vllm-vcr/gi, 'vLLM').replace(/vcr/gi, 'vLLM').replaceAll('-', ' ');
       const chip = `<span class="token-path-chip">${escapeHtml(displayLabel)}</span>`;
       return index === labels.length - 1 ? chip : `${chip}<span class="token-path-edge" aria-hidden="true">→</span>`;
     }).join('')}</div>`;
@@ -602,7 +602,7 @@
       return rankA - rankB || String(a.site || a.cluster || '').localeCompare(String(b.site || b.cluster || ''));
     }).map(provider => {
       const site = provider.site || provider.cluster || provider.name || 'unknown';
-      const displaySite = site === 'pool-a' ? 'Pool A' : site === 'pool-b' ? 'Pool B' : site;
+      const displaySite = site === 'pool-a' ? 'Pool A' : site === 'pool-b' ? 'Pool B' : String(site).replace(/vllm-vcr/gi, 'Provider').replace(/vcr/gi, 'Provider').replaceAll('-', ' ');
       const queue = provider.queue_depth?.value ?? provider.queue_depth;
       const rawQueue = provider.queue_depth?.raw_value;
       const capacity = provider.queue_depth?.capacity;
@@ -613,7 +613,8 @@
       const score = typeof provider.score === 'number' ? provider.score.toFixed(2) : '—';
       const rank = typeof provider.rank === 'number' ? `#${provider.rank}` : '—';
       const fresh = provider.queue_depth?.fresh === false || provider.kv_cache?.fresh === false ? 'stale' : 'fresh';
-      return `<tr><td><strong>${escapeHtml(displaySite)}</strong><small>${escapeHtml(site)} · ${escapeHtml(provider.cluster || provider.name || '')}</small></td><td>${rank}</td><td>${queueText}<small>${rawText}</small></td><td>${kvText}</td><td><span class="pressure-badge ${pressureClass(provider.pressure_level || 'unknown')}">${pressureLabel(provider.pressure_level || 'unknown')}</span></td><td>${score}</td><td><span class="epp-freshness epp-${fresh}">${fresh}</span></td></tr>`;
+      const displayCluster = String(provider.cluster || provider.name || '').replace(/vllm-vcr/gi, 'vLLM').replace(/vcr/gi, 'vLLM').replaceAll('-', ' ');
+      return `<tr><td><strong>${escapeHtml(displaySite)}</strong><small>${escapeHtml(displayCluster)}</small></td><td>${rank}</td><td>${queueText}<small>${rawText}</small></td><td>${kvText}</td><td><span class="pressure-badge ${pressureClass(provider.pressure_level || 'unknown')}">${pressureLabel(provider.pressure_level || 'unknown')}</span></td><td>${score}</td><td><span class="epp-freshness epp-${fresh}">${fresh}</span></td></tr>`;
     }).join('');
     const tables = gatewayViews.filter(view => view.providers?.length).map(view => `<section class="load-epp-perspective"><h4>${escapeHtml(view.label)} consumer gateway routing view</h4><p>Higher score wins. If scores tie, this consumer gateway’s locality and other tie-breakers determine rank.</p><div class="load-epp-table-wrap"><table class="load-epp-table"><thead><tr><th>Provider / site</th><th>Rank</th><th>Queue / capacity</th><th>KV cache</th><th>Pressure</th><th>Score</th><th>Metric state</th></tr></thead><tbody>${renderRows(view.providers)}</tbody></table></div></section>`).join('');
     container.innerHTML = `<div class="load-epp-heading"><div><strong>EPP details · both consumer gateway perspectives</strong><span>Each table shows the live EPP signals and routing order seen by that consumer gateway. Provider gateways receive the selected request; they do not choose the winner.</span></div><span>Refreshes every 3s</span></div>${tables}`;

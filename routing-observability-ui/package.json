@@ -5,17 +5,31 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test test/*.test.js"
+    "dev": "vite",
+    "build": "vite build",
+    "test": "node --test test/api.test.js test/token-rate-limit.test.js"
   },
   "dependencies": {
-    "express": "^5.1.0"
+    "@xyflow/react": "^12.11.3",
+    "express": "^5.1.0",
+    "lucide-react": "^1.32.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-router-dom": "^7.18.2",
+    "recharts": "^3.10.1"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.12"
   },
   "private": true,
   "type": "module",
   "devDependencies": {
-    "@playwright/test": "^1.62.1"
+    "@playwright/test": "^1.62.1",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.0.5",
+    "typescript": "^5.9.3",
+    "vite": "^8.2.1",
+    "vite-tsconfig-paths": "^6.1.1"
   }
 }
