@@ -6,14 +6,11 @@ the live Jaeger and routing-observability UI endpoints.
 
 ## Image contract
 
-The gateway must use the OTel-enabled Praxis image:
-
-```text
-ghcr.io/nerdalert/praxis-ai:otel-glb-demo
-```
-
-Do not substitute `ghcr.io/praxis-proxy/grid-ai-rollup:v0.1.3`; that released
-image does not contain the OTel tracing instrumentation.
+The gateway must use an explicitly built OTel-enabled Praxis AI image from the
+compatible provider-selection foundation in
+<https://github.com/praxis-proxy/ai/pull/731>. Set the image override to a
+locally built or organization-published image before deployment; this runbook
+does not prescribe a contributor registry.
 
 Supporting images:
 
@@ -48,7 +45,7 @@ In a second terminal, from the repository root:
 
 ```bash
 export GRID_REPO="$PWD/grid"
-export GRID_XTASK_GATEWAY_IMAGE=ghcr.io/nerdalert/praxis-ai:otel-glb-demo
+export GRID_XTASK_GATEWAY_IMAGE="${GATEWAY_IMAGE:?set the OTel-enabled gateway image}"
 export GRID_XTASK_OPERATOR_IMAGE=ghcr.io/praxis-proxy/grid-operator:v0.1.3
 export GRID_XTASK_VCR_IMAGE=ghcr.io/neuralmagic/vllm-vcr:vllm0.23
 export GRID_XTASK_IMAGE_PULL_POLICY=Always
@@ -107,8 +104,8 @@ kubectl --context kind-grid-glb-east-edge -n grid-system get pods \
 curl -s http://localhost:16686/api/services | python3 -m json.tool
 ```
 
-Confirm that gateway pods use `ghcr.io/nerdalert/praxis-ai:otel-glb-demo`, not
-the released `grid-ai-rollup:v0.1.3` image.
+Confirm that gateway pods use the explicitly supplied OTel-enabled image and
+record its immutable image ID before the run.
 
 ## Observation and cleanup
 

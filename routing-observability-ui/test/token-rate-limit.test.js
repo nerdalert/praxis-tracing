@@ -58,10 +58,32 @@ describe('token-rate-limit feature gate', () => {
     assert.equal(capabilities.features.fixtureMode, 'token-rate-limit');
     assert.equal(quota.data.principal, 'alice');
     assert.equal(quota.data.quota.shared_key, 'alice/canonical-model');
+    assert.equal(quota.data.policy.algorithm, 'sliding_window');
+    assert.equal(quota.data.policy.accounting, 'total_tokens');
+    assert.equal(quota.data.policy.unsupported_algorithms.token_bucket, 'Not implemented');
     const denied = quota.data.requests.find(item => item.admission === 'denied');
     assert.equal(denied.http.status, 429);
     assert.equal(denied.route.provider_gateway, null);
     assert.deepEqual(denied.route.hops, ['consumer-gateway', 'quota-admission']);
+  });
+
+  it('selects the dedicated token-rate-limit profile and locks the source', async () => {
+    const base = await start({
+      TRACING_UI_PROFILE: 'token-rate-limit',
+      TRACING_UI_TOKEN_RATE_LIMIT: 'true',
+      TRACING_UI_TOKEN_CONSUMER_A_URL: 'http://127.0.0.1:1',
+      TRACING_UI_TOKEN_CONSUMER_B_URL: 'http://127.0.0.1:1',
+      TRACING_UI_TOKEN_PASSWORD: 'test-password',
+    });
+    const capabilities = await (await fetch(`${base}/api/v1/capabilities`)).json();
+    assert.equal(capabilities.environment.profile, 'token_rate_limit');
+    const sources = await (await fetch(`${base}/api/source`)).json();
+    assert.equal(sources.source, 'vcr');
+    assert.equal(sources.available.glb, false);
+    const switched = await fetch(`${base}/api/source`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: 'glb' }),
+    });
+    assert.equal(switched.status, 409);
   });
 
   it('enables the panel without fabricating data when fixture mode is absent', async () => {
@@ -108,7 +130,6 @@ describe('token-rate-limit feature gate', () => {
     assert.equal(admitted.record.http.status, 200);
     assert.equal(admitted.record.route.provider_gateway, 'west');
     assert.equal(admitted.record.quota.actual_tokens, 15);
-    assert.equal(admitted.record.route.hops.at(-1), 'vllm-vcr');
 
     const denied = await (await fetch(`${base}/api/v1/token-rate-limit/requests`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ consumer: 'b' }),

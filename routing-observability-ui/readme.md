@@ -36,51 +36,6 @@ cd routing-observability-ui
 
 Open http://localhost:3001 in a browser.
 
-## Optional Basic Auth
-
-Authentication is disabled by default. To protect the UI and its API routes,
-set both variables; setting only one causes startup to fail:
-
-```console
-TRACING_UI_AUTH_USERNAME=praxis \
-TRACING_UI_AUTH_PASSWORD='redhat123' \
-PORT=3001 node server.js
-```
-
-For Kubernetes or OpenShift, store the values in a Secret and inject them into
-the Deployment. Do not put the password in a ConfigMap, image, Route, browser
-JavaScript, or command history:
-
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: tracing-ui-auth
-type: Opaque
-stringData:
-  username: praxis
-  password: redhat123
-```
-
-```yaml
-env:
-  - name: TRACING_UI_AUTH_USERNAME
-    valueFrom:
-      secretKeyRef: {name: tracing-ui-auth, key: username}
-  - name: TRACING_UI_AUTH_PASSWORD
-    valueFrom:
-      secretKeyRef: {name: tracing-ui-auth, key: password}
-```
-
-This protects the UI when it is exposed through an OpenShift Route.
-
-Jaeger is a separate application and does not consume these environment
-variables. For the demo, protect its public Route or Ingress with the same
-Secret (`praxis` / `redhat123`) using the platform's Basic Auth proxy or
-authentication middleware, or keep Jaeger private and expose it only through
-an authenticated port-forward. Do not add the password to the Jaeger image,
-Jaeger configuration, a ConfigMap, browser JavaScript, or a URL.
-
 For the real GLB tracing path, use the OTel-enabled Praxis AI fork:
 <https://github.com/nerdalert/ai/tree/grid-otel-demo>. The released Praxis
 image does not include the experimental tracing hooks used by that demo.
@@ -241,6 +196,55 @@ load runs. The load panel reports ingress-gateway verification, HTTP outcomes,
 and provider attribution; it does not claim that the selected ingress pool was
 the provider chosen by Grid. This control is available only for the live
 llm-d/EPP source and requires both Kind pool contexts.
+
+## Narrated recording workflow
+
+The multi-quota recording uses the live UI capture as the source of truth. Keep
+the recorded browser segment unchanged and place browser-rendered slides before
+and after it. The recording should show Odin, Thor, and Loki, their separate
+sliding-window budgets, the fixed reservation, actual total usage, refunds or
+overage, charge-by-charge expiry, provider attribution, and 429 responses that
+stop before provider routing.
+
+The reference workflow uses OpenAI speech generation and Whisper caption timing:
+
+1. Write narration scene by scene and keep each TTS request below the API input
+   limit. Paragraph-sized requests make it easier to re-time narration when the
+   live capture changes.
+2. Generate WAV narration with `tts-1-hd` and the `alloy` voice. Keep the API
+   key in the environment or a local secret file; never put it in this
+   repository or browser code.
+3. Transcribe the final concatenated WAV with `whisper-1` using
+   `verbose_json` and segment timestamps.
+4. Add the intentional visual lead-in to the caption timestamps, then inspect
+   the SRT for overlaps and readable lower-third placement.
+5. Assemble the slides, the unchanged live capture, narration, and captions
+   with FFmpeg. Include a short opening pause and a quiet closing hold so the
+   final narration is not clipped.
+6. Review the assembled video at the slide/live-capture transition, during the
+   quota-expiry wait, and at the closing hold. Re-run TTS, caption generation,
+   and assembly together whenever narration text changes.
+
+Example settings:
+
+```console
+export OPENAI_API_KEY="$(< /path/to/openai-key)"
+
+# Run these from a recording package containing the corresponding scripts.
+./generate-voice.sh
+node narration/generate-srt.mjs
+./assemble.sh
+```
+
+The recording script must send `model: "tts-1-hd"`, `voice: "alloy"`,
+`response_format: "wav"`, and `speed: 1.0` in its speech request. The current
+reference package uses those settings with
+`whisper-1` segment timing, a three-second opening delay, and a final silent
+hold. If the live capture duration changes, update the slide segment durations,
+audio delay, caption offset, and final hold as one timing change; do not reuse
+old captions against a new narration length. Validate the final media with
+`ffprobe` and preserve the source capture, narration text, WAV, transcription,
+SRT, metadata, and checksums alongside the output.
 
 ## Scoring model
 

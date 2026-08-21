@@ -1,0 +1,102 @@
+{
+  "schema_version": "1.0.0",
+  "revision": {
+    "kind": "content_addressed",
+    "algorithm": "sha256",
+    "value": "1c1ff8aa73963ad3c7cbdd6b0130202b6d2deb40499037a7dd9781443654d0f6"
+  },
+  "content_digest": {
+    "algorithm": "sha256",
+    "value": "1c1ff8aa73963ad3c7cbdd6b0130202b6d2deb40499037a7dd9781443654d0f6"
+  },
+  "scope": {
+    "network": "grid-token-rate-limit",
+    "gateway": "consumer-gateway-a",
+    "namespace": "grid-system",
+    "local_site": "west"
+  },
+  "provenance": {
+    "producer": "grid-operator",
+    "producer_version": "0.1.3",
+    "source_name": "grid-token-rate-limit",
+    "source_uid": "16eff482-3bc1-4427-a68b-160759e27efb",
+    "source_generation": 1,
+    "rendered_at": "2026-08-20T07:30:51.301985814Z"
+  },
+  "overlay": {
+    "network": "grid-token-rate-limit",
+    "local_site": "west",
+    "candidates": [
+      {
+        "kind": "inference_model",
+        "name": "Qwen/Qwen3-0.6B",
+        "site": "west",
+        "cluster": "vcr-west-provider",
+        "fresh": true,
+        "stable_id": "f4c20a10",
+        "admission_state": "new_and_existing",
+        "selection_tier": "same_site",
+        "score": 0.0,
+        "score_breakdown": {
+          "locality": 0.0,
+          "queue_depth": 0.0,
+          "kv_cache": 0.0,
+          "prefix_cache": 0.0,
+          "latency": 0.0,
+          "cost": 0.0,
+          "total": 0.0
+        },
+        "rank": 0,
+        "selection_group": 0
+      },
+      {
+        "kind": "inference_model",
+        "name": "Qwen/Qwen3-0.6B",
+        "site": "central",
+        "cluster": "vcr-central-provider",
+        "fresh": true,
+        "stable_id": "c7fa24b0",
+        "admission_state": "new_and_existing",
+        "selection_tier": "unknown",
+        "score": 0.0,
+        "score_breakdown": {
+          "locality": 0.0,
+          "queue_depth": 0.0,
+          "kv_cache": 0.0,
+          "prefix_cache": 0.0,
+          "latency": 0.0,
+          "cost": 0.0,
+          "total": 0.0
+        },
+        "rank": 1,
+        "selection_group": 0
+      },
+      {
+        "kind": "inference_model",
+        "name": "Qwen/Qwen3-0.6B",
+        "site": "east",
+        "cluster": "vcr-east-provider",
+        "fresh": true,
+        "stable_id": "9d876274",
+        "admission_state": "new_and_existing",
+        "selection_tier": "unknown",
+        "score": 0.0,
+        "score_breakdown": {
+          "locality": 0.0,
+          "queue_depth": 0.0,
+          "kv_cache": 0.0,
+          "prefix_cache": 0.0,
+          "latency": 0.0,
+          "cost": 0.0,
+          "total": 0.0
+        },
+        "rank": 2,
+        "selection_group": 0
+      }
+    ],
+    "selection_policy": {
+      "mode": "roundRobin"
+    },
+    "generated_at": "2026-08-20T07:30:51.301985814Z"
+  }
+}

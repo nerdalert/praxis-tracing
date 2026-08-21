@@ -89,10 +89,10 @@ These are the canonical demo assets.
 The VCR backend is documented at
 <https://github.com/neuralmagic/vllm-vcr/blob/main/README.md>.
 
-The OTel-enabled Praxis AI fork used by the tracing demos is
-<https://github.com/nerdalert/ai/tree/grid-otel-demo>. The fork contains the
-experimental tracing hooks and must be used when running the real Praxis/GLB
-path; the standard released Praxis image does not provide those hooks.
+The tracing demos use an explicitly supplied OTel-enabled Praxis AI build. The
+provider-selection foundation is tracked in
+<https://github.com/praxis-proxy/ai/pull/731>; deployments must provide the
+compatible image through their normal image-override mechanism.
 
 <img width="975" height="1115" alt="grid-queuedepth-demo" src="https://github.com/user-attachments/assets/85c6bc51-efb2-45df-857f-0d93d28c0802" />
 
@@ -103,8 +103,10 @@ POC are functional and tested. The production Praxis instrumentation and
 Grid demo integrations are intentionally isolated from the upstream Praxis and
 Grid repositories until the design is complete.
 
-The OTel-enabled Praxis AI feature branch used by the real tracing demos is
-[nerdalert/ai `grid-otel-demo`](https://github.com/nerdalert/ai/tree/grid-otel-demo).
+The Grid provider-selection foundation used by the real routing demos is
+tracked in <https://github.com/praxis-proxy/grid/pull/65>. The distributed
+token-quota topology is maintained as an integration example in the
+experimental demos repository.
 
 See `runbook.md` for the reproducible runtime workflow and known limitations.
 
