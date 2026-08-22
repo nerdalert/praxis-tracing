@@ -152,6 +152,9 @@ function TokenPath({ row }: { row: any }) {
           </span>
         </Fragment>
       ))}
+      {row.admission !== "admitted" && (
+        <small className="token-no-hop">{row.http?.status || row.status || "429"} · no provider hop</small>
+      )}
     </div>
   );
 }
@@ -707,7 +710,7 @@ function TokenPanel() {
   const [charges, setCharges] = useState<Record<string, number>>({});
   const refresh = useCallback(async () => {
     try {
-      const value = await api.tokenStatus();
+      const value = await api.tokenStatus(fixtureState);
       if (!(value as any).enabled) {
         setStatus(null);
         setRows([]);
@@ -724,7 +727,7 @@ function TokenPanel() {
     } catch {
       setStatus(null);
     }
-  }, []);
+  }, [fixtureState]);
   useEffect(() => {
     refresh();
     const id = window.setInterval(refresh, 3000);

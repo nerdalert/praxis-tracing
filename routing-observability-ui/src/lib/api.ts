@@ -33,7 +33,10 @@ export const api = {
   scenario: (name: string) => post(`/api/scenario/${name}`),
   generate: (body: unknown) => post("/api/generate", body),
   cancel: () => post("/api/generate/cancel"),
-  tokenStatus: () => get<Record<string, unknown>>("/api/v1/token-rate-limit"),
+  tokenStatus: (state?: string) =>
+    get<Record<string, unknown>>(
+      `/api/v1/token-rate-limit${state ? `?state=${encodeURIComponent(state)}` : ""}`,
+    ),
   tokenRequest: (consumer: "a" | "b", app?: string, tokens?: number) =>
     post("/api/v1/token-rate-limit/requests", { consumer, app, tokens }),
   clearTokenResults: () =>
