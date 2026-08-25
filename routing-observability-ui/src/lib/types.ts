@@ -4,6 +4,9 @@ export type Provider = {
   name?: string;
   site?: string;
   cluster?: string;
+  external?: boolean;
+  backend_kind?: string;
+  selection_group?: number;
   score?: number | null;
   rank?: number | null;
   pressure?: string;

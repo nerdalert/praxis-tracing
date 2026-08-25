@@ -197,6 +197,64 @@ and provider attribution; it does not claim that the selected ingress pool was
 the provider chosen by Grid. This control is available only for the live
 llm-d/EPP source and requires both Kind pool contexts.
 
+## Opt-in cloud-burst demo
+
+The cloud-burst panel is disabled by default and, like the quota view, requests
+no cloud-burst data until it is explicitly enabled. It visualizes local-first
+routing with burst to an external provider: sustained load raises the local
+llm-d EPP queue, stabilized admission flips to `existing_only`, and new requests
+burst to the external target while existing sessions stay local. Enable it with:
+
+```console
+TRACING_UI_TOKEN_CLOUD_BURST=true \
+TRACING_UI_CB_CONTEXT=kind-grid-token-rate-limit-west \
+node server.js
+```
+
+### Backend sensitivity: Simulation vs Real GPU
+
+A real GPU pool saturates — and therefore bursts — on a far smaller queue than
+the kind `llm-d-inference-sim` mock, whose deep waiting queue needs heavy load
+to fill. The **Backend** dropdown on the load generator selects the sensitivity
+preset; each preset sets both the pressure-gauge capacity (visualization) and
+the generator replica count (how much load *Simulate load* applies):
+
+| Mode | Gauge capacity | Generator replicas | Meaning |
+|------|----------------|--------------------|---------|
+| `sim` (default) | `TRACING_UI_CB_QUEUE_CAPACITY` (8) | `TRACING_UI_CB_LOAD_REPLICAS` (3) | kind mock — deep queue, needs heavy load |
+| `gpu` | `TRACING_UI_CB_QUEUE_CAPACITY_GPU` (2) | `TRACING_UI_CB_LOAD_REPLICAS_GPU` (1) | real GPU — saturates and bursts on light load |
+
+`TRACING_UI_CB_MODE` (default `sim`) sets the initial selection. The badge
+(`LOCAL` / `CLOUD BURST ACTIVE`) always reflects the **real** Grid admission
+state read from the overlay, not the dropdown. The dropdown changes the load
+applied and the gauge sensitivity only. For an actual GPU deployment, set Grid's
+`scoringPolicy` queue-depth capacity to match `TRACING_UI_CB_QUEUE_CAPACITY_GPU`
+so the real admission flip lines up with the gauge.
+
+### Interactive cloud-burst console
+
+When the cloud-burst gate is enabled, the panel provides bounded operator
+controls for the static-metric Kind topology. Controls call the UI server,
+which performs the privileged work; the browser never receives cluster
+credentials or the OpenAI key.
+
+- Per-provider sliders and calm/pressure/saturate presets update the
+  `llm-d-inference-sim` metric and wait for Grid/Praxis convergence.
+- Bounded authenticated traffic can be sent through Consumer A or B with
+  sticky or unique sessions. Results use observed provider headers and usage.
+- Weight changes, health changes, recovery, and baseline/partial/full scenarios
+  are applied through the server-side control API.
+- Cloud cost uses real OpenAI usage for cloud hits. Local sim usage is labeled
+  estimated when the backend emits no usage metadata.
+- The guided tour runs the main baseline, pressure, burst, recovery, and
+  reweight sequence. Actions reflect live state or an explicit error; they do
+  not fabricate quota or routing data.
+
+The allocation buttons intentionally report that dynamic policy reload is not
+wired when the mounted gateway configuration has no reloadable allocation
+source. They are not proof of soft/hard allocation behavior until a real
+gateway policy watcher and reload barrier are deployed.
+
 ## Narrated recording workflow
 
 The multi-quota recording uses the live UI capture as the source of truth. Keep
@@ -261,6 +319,21 @@ Matches the Grid scoring crate:
 | `PORT` | `3001` | UI server port |
 | `JAEGER_URL` | `http://localhost:16686` | Jaeger query API base URL |
 | `JAEGER_UI_URL` | value of `JAEGER_URL` | Browser-visible Jaeger UI base URL used by **Open raw trace**; set this to the forwarded/public Jaeger address when the dashboard is remote |
+| `TRACING_UI_TOKEN_CLOUD_BURST` | unset | Feature gate for the opt-in cloud-burst panel |
+| `TRACING_UI_CB_CONTEXT` | unset | kube context the panel reads (also required to enable the panel) |
+| `TRACING_UI_CB_NAMESPACE` | `grid-system` | Namespace for overlay/EPP/load lookups |
+| `TRACING_UI_CB_MODE` | `sim` | Initial backend-sensitivity preset (`sim` or `gpu`) |
+| `TRACING_UI_CB_QUEUE_CAPACITY` | `8` | `sim` gauge capacity (queue depth mapped to 100%) |
+| `TRACING_UI_CB_QUEUE_CAPACITY_GPU` | `2` | `gpu` gauge capacity — real GPU bursts on less queue |
+| `TRACING_UI_CB_LOAD_REPLICAS` | `3` | `sim` generator replicas when load is on |
+| `TRACING_UI_CB_LOAD_REPLICAS_GPU` | `1` | `gpu` generator replicas — lighter load |
+| `TRACING_UI_CB_LOAD_DEPLOY` | `epp-load` | Deployment scaled by *Simulate load* |
+| `TRACING_UI_CB_QUEUE_METRIC` | `inference_pool_average_queue_size` | EPP queue metric scraped for pressure |
+| `TRACING_UI_CB_EXTERNAL_TARGET` | `api.openai.com` | External burst target shown in the topology |
+| `TRACING_UI_CB_CONTROL_SCRIPT` | unset | Required server-side static-metric helper |
+| `TRACING_UI_CB_PRINCIPAL` | `alice` | Server-side principal used by bounded cloud-burst traffic |
+| `TRACING_UI_CB_PASSWORD` | unset | Server-side password; never expose it to the browser |
+| `TRACING_UI_CB_TRAFFIC_LIMIT` | `100000` | Maximum logical quota for the bounded traffic adapter |
 
 Raw-trace links are shown only for requests with an indexed Jaeger trace. Live
 gateway responses from the llm-d/VCR request generator are real HTTP results,
@@ -268,6 +341,13 @@ but they are sampled gateway observations when no OTel trace ID is returned;
 their request details therefore show **Raw trace unavailable for this
 observation** instead of navigating to a dummy `/#` URL. The same rule applies
 to local demo rows and any other observation without exact trace evidence.
+
+For a two-application quota view, set `TRACING_UI_TOKEN_MULTI_QUOTA=true` and
+point `TRACING_UI_TOKEN_APPS_FILE` at
+`examples/token-rate-limit-apps.app-a-b.json`. The example uses App-a/alice and
+App-b/bob as separate authenticated identities with separate Valkey quota rules;
+passwords are supplied through server-side files and are never sent to the
+browser. The gateway must contain matching authenticated users and rules.
 
 ## Teardown
 

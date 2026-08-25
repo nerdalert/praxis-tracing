@@ -37,6 +37,7 @@ export const api = {
     get<Record<string, unknown>>(
       `/api/v1/token-rate-limit${state ? `?state=${encodeURIComponent(state)}` : ""}`,
     ),
+  cloudBurst: () => get<Record<string, unknown>>("/api/v1/cloud-burst"),
   tokenRequest: (consumer: "a" | "b", app?: string, tokens?: number) =>
     post("/api/v1/token-rate-limit/requests", { consumer, app, tokens }),
   clearTokenResults: () =>

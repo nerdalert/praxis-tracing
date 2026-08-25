@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import CloudBurstPanel from "./CloudBurstPanel";
 import {
   Activity,
   ArrowDown,
@@ -161,10 +162,12 @@ function TokenPath({ row }: { row: any }) {
 
 function TokenSettlement({ row }: { row: any }) {
   const quota = row.quota || {};
-  if (quota.settlement === "refund") return <small className="token-settlement refund">Reserved {quota.reservation_estimate} · actual {quota.actual_tokens} · refunded {quota.refund_tokens}</small>;
-  if (quota.settlement === "overage") return <small className="token-settlement overage">Reserved {quota.reservation_estimate} · actual {quota.actual_tokens} · overage {quota.overage_tokens}</small>;
-  if (quota.settlement === "exact") return <small className="token-settlement">Reserved {quota.reservation_estimate} · actual {quota.actual_tokens}</small>;
-  return null;
+  const governance = quota.governance === "over_allocation" ? "soft · over allocation" : quota.governance === "within" ? "soft · within allocation" : null;
+  const governanceLabel = governance ? <small className={`token-settlement ${quota.governance === "over_allocation" ? "overage" : ""}`}>{governance}</small> : null;
+  if (quota.settlement === "refund") return <>{governanceLabel}<small className="token-settlement refund">Reserved {quota.reservation_estimate} · actual {quota.actual_tokens} · refunded {quota.refund_tokens}</small></>;
+  if (quota.settlement === "overage") return <>{governanceLabel}<small className="token-settlement overage">Reserved {quota.reservation_estimate} · actual {quota.actual_tokens} · overage {quota.overage_tokens}</small></>;
+  if (quota.settlement === "exact") return <>{governanceLabel}<small className="token-settlement">Reserved {quota.reservation_estimate} · actual {quota.actual_tokens}</small></>;
+  return governanceLabel;
 }
 
 function SlidingWindowActivity({ status, rows }: { status: any; rows: any[] }) {
@@ -318,11 +321,28 @@ function Topology({
   const providerFor = (request?: RequestItem | null): string | null =>
     request?.route?.provider_gateway || request?.provider || null;
   const currentProvider = providerFor(activeRequest);
+  const routeText = (activeRequest?.route?.hops || []).join(" ").toLowerCase();
+  const activeExternalRoute = /api\.openai\.com|openai route|bedrock route/.test(routeText);
+  const providerMatchesGateway = (provider: Provider) => {
+    if (!currentProvider) return false;
+    const gateway = String(currentProvider).toLowerCase();
+    return [provider.site, provider.cluster, provider.name, provider.id]
+      .filter(Boolean)
+      .some((value) => {
+        const candidate = String(value).toLowerCase();
+        const parts = candidate.split(/[-_. ]+/).filter(Boolean);
+        return candidate === gateway || parts.includes(gateway) || candidate.includes(`-${gateway}`) || candidate.includes(` ${gateway}`) || gateway.includes(`-${candidate}`);
+      });
+  };
+  const providerIsExternal = (provider: Provider) => Boolean(provider.external || provider.backend_kind === "api_provider" || provider.backend_kind === "cloud_managed" || /openai|bedrock|cloud/i.test(`${provider.cluster || ""} ${provider.site || ""} ${provider.name || ""}`));
+  const providerIsActive = (provider: Provider) => providerMatchesGateway(provider) && providerIsExternal(provider) === activeExternalRoute;
   const activeProviderNames = new Set<string>();
   if (currentProvider) activeProviderNames.add(currentProvider);
   const currentConsumer = activeRequest ? consumerKey(activeRequest) : "";
-  const consumerMatches = (value: string, key: string) =>
-    value === key || value.endsWith(`consumer-gateway-${key}`) || value.endsWith(`-${key}`);
+  const consumerMatches = (value: string, key: string) => {
+    const aliases = key === "a" ? ["a", "east"] : key === "b" ? ["b", "west"] : [key];
+    return aliases.some((alias) => value === alias || value.includes(`${alias} consumer`) || value.endsWith(`consumer-gateway-${alias}`) || value.endsWith(`-${alias}`));
+  };
   const PersonaEdge = (props: EdgeProps) => {
     const [path] = getSmoothStepPath(props);
     const colors = Array.isArray(props.data?.colors) && props.data.colors.length
@@ -381,7 +401,7 @@ function Topology({
       sourcePosition: Position.Right,
       targetPosition: Position.Left,
     })),
-    ...providers.slice(0, 3).map((p, index) => ({
+    ...providers.map((p, index) => ({
       id: `provider-${index}`,
       position: { x: 610, y: 40 + index * 105 },
       data: {
@@ -392,11 +412,12 @@ function Topology({
                 ? quotaProviderLabel(p)
                 : title(p.site || p.name || `Provider ${index + 1}`)}
             </strong>
-            <small>{p.cluster || "provider gateway"}</small>
+            <small>InferenceProvider · {p.cluster || "provider gateway"}</small>
           </>
         ),
       },
       className: `topology-node provider ${
+        providerIsActive(p) ||
         activeProviderNames.has(p.site || "") ||
         activeProviderNames.has(p.name || "") ||
         activeProviderNames.has(p.id || "")
@@ -420,9 +441,9 @@ function Topology({
       data: { colors: appColors, selected: consumerMatches(currentConsumer, consumer.key) },
     })),
     ...consumerNodes.flatMap((consumer) =>
-      providers.slice(0, 3).map((provider, index) => {
+      providers.map((provider, index) => {
         const providerId = provider.site || provider.name || provider.id;
-        const current = consumerMatches(currentConsumer, consumer.key) && providerId === currentProvider;
+        const current = consumerMatches(currentConsumer, consumer.key) && providerIsActive(provider);
         return {
           id: `${consumer.id}-provider-${index}`,
           type: "smoothstep",
@@ -458,7 +479,7 @@ function Topology({
         </span>
         <span>
           <i className="legend-dot muted" />
-          eligible routes · Odin / Thor / Loki
+          eligible routes · application paths
         </span>
       </div>
     </div>
@@ -720,7 +741,7 @@ function TokenPanel() {
       setStatus({
         ...(value as any),
         ...data,
-        principal: data.multi_quota ? "Odin · Thor · Loki" : `${data.principal || data.username || "alice"}/${data.model || "canonical-model"}`,
+        principal: data.multi_quota ? data.apps.map((app: any) => app.name).join(" · ") : `${data.principal || data.username || "alice"}/${data.model || "canonical-model"}`,
         fixture: (value as any).fixture_mode === "token-rate-limit",
       });
       setRows(data.requests || []);
@@ -800,7 +821,7 @@ function TokenPanel() {
           <h2>{status?.multi_quota ? "Multi-application token quotas" : "Shared token-rate limit"}</h2>
           <p className={status?.multi_quota ? "multi-quota-subtitle" : undefined}>
             {status?.multi_quota
-              ? "Live Odin, Thor, and Loki requests through two consumer gateways with independent shared quotas. Denied traffic stops before provider routing."
+              ? `Live ${status.apps.map((app: any) => app.name).join(", ")} requests through two consumer gateways with independent shared quotas. Denied traffic stops before provider routing.`
               : "Live requests through two consumer gateways sharing one model quota. Denied traffic stops before provider routing."}
           </p>
         </div>
@@ -860,9 +881,10 @@ function TokenPanel() {
               Clear results
             </button>
           </div>
+          {status?.cloud_burst && <CloudBurstPanel />}
           {status.multi_quota && Array.isArray(status.apps) && (
             <section className="multi-quota-apps" aria-label="Independent application quotas">
-              <div className="multi-quota-heading"><div><span className="eyebrow">Application budgets</span><strong>Three independent sliding-window quotas · 20-token reservation estimate</strong></div><span className="muted-text multi-quota-note">Color identifies the app path; identity and Valkey state remain authoritative.</span></div>
+              <div className="multi-quota-heading"><div><span className="eyebrow">Application budgets</span><strong>{status.apps.length} independent sliding-window quotas · fixed reservation estimates</strong></div><span className="muted-text multi-quota-note">Color identifies the app path; identity and Valkey state remain authoritative.</span></div>
               <div className="multi-quota-app-grid">
                 {status.apps.map((app: any) => {
                   const charge = charges[app.id] || 5;
@@ -870,8 +892,11 @@ function TokenPanel() {
                     <div className="multi-quota-app-title"><span className="multi-quota-swatch" /><strong>{app.name}</strong><span className="mono">{app.username}</span></div>
                     <div className="multi-quota-budget">{app.limit} tokens / rolling {app.window_seconds}s · reserves {app.estimate_tokens} tokens</div>
                     <div className="multi-quota-stats"><span>Used <b>{app.used ?? "—"}</b></span><span>Raw remaining tokens <b>{app.raw_remaining ?? "—"}</b></span><span>Admissible <b>{app.remaining ?? "—"}</b></span><span>Admitted <b>{app.admitted}</b></span><span>Blocked <b>{app.denied}</b></span></div>
+                    <div className={`multi-quota-governance ${app.governance === "over_allocation" ? "overage" : app.governance === "approaching" ? "approaching" : ""}`}>
+                      {app.governance === "over_allocation" ? "SERVED · over soft cap · no 429" : app.governance === "approaching" ? "Approaching soft cap" : "Within soft cap"}
+                    </div>
                     <label className="multi-quota-slider">Output cap <input type="range" min="1" max="12" value={charge} onChange={(event) => setCharges((current) => ({ ...current, [app.id]: Number(event.target.value) }))} /><output>{charge} output tokens · fixed reservation {app.estimate_tokens || 5} tokens</output></label>
-                    <div className="multi-quota-actions"><button className="primary-button" disabled={busy} onClick={() => request("a", app.id)}>Consumer A</button><button className="primary-button" disabled={busy} onClick={() => request("b", app.id)}>Consumer B</button></div>
+                    <div className="multi-quota-actions"><button className="primary-button" disabled={busy} onClick={() => request("a", app.id)}>{status.consumers?.[0] || "East Consumer Gateway"}</button><button className="primary-button" disabled={busy} onClick={() => request("b", app.id)}>{status.consumers?.[1] || "West Consumer Gateway"}</button></div>
                   </article>;
                 })}
               </div>
@@ -1019,8 +1044,9 @@ export function App() {
       api.source(),
       api.traces(),
       api.tokenStatus(),
+      api.cloudBurst(),
     ]);
-    const [s, c, p, r, src, traces, token] = results;
+    const [s, c, p, r, src, traces, token, cloudBurst] = results;
     if (s.status === "fulfilled") setStatus(s.value);
     if (c.status === "fulfilled") setCapabilities(c.value);
     if (token.status === "fulfilled") {
@@ -1070,7 +1096,24 @@ export function App() {
             queue_depth: { value: Number(hits) },
           }))
         : [];
-      setProviders(liveProviders.length ? liveProviders : tokenProviders);
+      const cloudCandidates = cloudBurst.status === "fulfilled" && Array.isArray((cloudBurst.value as any).groups)
+        ? (cloudBurst.value as any).groups.map((candidate: any, index: number) => ({
+            id: candidate.stable_id || candidate.cluster || candidate.site || `provider-${index}`,
+            name: candidate.name || candidate.site || candidate.cluster,
+            site: candidate.site || null,
+            cluster: candidate.cluster || null,
+            external: Boolean(candidate.external),
+            backend_kind: candidate.backend_kind || null,
+            selection_group: candidate.group ?? candidate.selection_group ?? 0,
+            selection_tier: candidate.tier || candidate.selection_tier || null,
+            admission_state: candidate.admission || candidate.admission_state || null,
+            healthy: candidate.admission !== "none",
+            rank: candidate.rank ?? index,
+            pressure: candidate.admission === "existing_only" ? "high" : "normal",
+            queue_depth: candidate.queue_depth == null ? null : { value: Number(candidate.queue_depth) },
+          }))
+        : [];
+      setProviders(cloudCandidates.length ? cloudCandidates : (liveProviders.length ? liveProviders : tokenProviders));
     }
     if (r.status === "fulfilled") {
       const items = r.value.requests || r.value.items || [];
@@ -1453,9 +1496,7 @@ export function App() {
               </div>
               <div className="provider-list">
                 {providers.length ? (
-                  providers
-                    .slice(0, 3)
-                    .map((provider, index) => (
+                  providers.map((provider, index) => (
                         <ProviderCard
                         key={provider.id || provider.site || index}
                         provider={provider}

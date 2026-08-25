@@ -1,5 +1,5 @@
 import express from 'express';
-import { createHmac, timingSafeEqual } from 'crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'crypto';
 import { readFileSync, existsSync, readdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -122,6 +122,10 @@ const TOKEN_RATE_LIMIT_CONSUMERS = {
   a: process.env.TRACING_UI_TOKEN_CONSUMER_A_URL || null,
   b: process.env.TRACING_UI_TOKEN_CONSUMER_B_URL || null,
 };
+const TOKEN_RATE_LIMIT_CONSUMER_LABELS = {
+  a: process.env.TRACING_UI_TOKEN_CONSUMER_A_LABEL || 'consumer-gateway-a',
+  b: process.env.TRACING_UI_TOKEN_CONSUMER_B_LABEL || 'consumer-gateway-b',
+};
 const TOKEN_RATE_LIMIT_MODEL = process.env.TRACING_UI_TOKEN_MODEL || 'Qwen/Qwen3-0.6B';
 const TOKEN_RATE_LIMIT_USERNAME = process.env.TRACING_UI_TOKEN_USERNAME || 'alice';
 const TOKEN_RATE_LIMIT_CONFIGURED_LIMIT = Number.parseInt(process.env.TRACING_UI_TOKEN_LIMIT || '60', 10);
@@ -133,6 +137,9 @@ const TOKEN_RATE_LIMIT_PASSWORD_FILE = process.env.TRACING_UI_TOKEN_PASSWORD_FIL
 const TOKEN_RATE_LIMIT_PASSWORD = process.env.TRACING_UI_TOKEN_PASSWORD
   || (TOKEN_RATE_LIMIT_PASSWORD_FILE ? readFileSync(TOKEN_RATE_LIMIT_PASSWORD_FILE, 'utf8').trim() : null);
 const TOKEN_RATE_LIMIT_MULTI_QUOTA = strictBoolean('TRACING_UI_TOKEN_MULTI_QUOTA');
+// Feature gate: cloud-burst pressure/failover visualization. Additive and
+// opt-in — when off, the quota demo behaves exactly as before.
+const TOKEN_CLOUD_BURST = strictBoolean('TRACING_UI_TOKEN_CLOUD_BURST');
 const TOKEN_RATE_LIMIT_APPS_FILE = process.env.TRACING_UI_TOKEN_APPS_FILE || null;
 function loadTokenRateLimitApps() {
   if (!TOKEN_RATE_LIMIT_MULTI_QUOTA || !TOKEN_RATE_LIMIT_APPS_FILE) return [];
@@ -141,7 +148,7 @@ function loadTokenRateLimitApps() {
   try { parsed = JSON.parse(readFileSync(TOKEN_RATE_LIMIT_APPS_FILE, 'utf8')); } catch (error) {
     throw new Error(`TRACING_UI_TOKEN_APPS_FILE is not valid JSON: ${error.message}`);
   }
-  if (!Array.isArray(parsed) || parsed.length !== 3) throw new Error('TRACING_UI_TOKEN_APPS_FILE must contain exactly three applications');
+  if (!Array.isArray(parsed) || parsed.length < 2 || parsed.length > 3) throw new Error('TRACING_UI_TOKEN_APPS_FILE must contain two or three applications');
   return parsed.map((entry, index) => {
     if (!entry || typeof entry !== 'object' || !/^[a-z][a-z0-9-]{0,31}$/.test(entry.id)
       || !/^[a-z][a-z0-9-]{0,31}$/.test(entry.username) || typeof entry.model !== 'string' || entry.model.length < 1 || entry.model.length > 128
@@ -150,8 +157,9 @@ function loadTokenRateLimitApps() {
     const limit = Number.parseInt(entry.limit, 10);
     const windowSeconds = Number.parseInt(entry.windowSeconds, 10);
     const estimateTokens = Number.parseInt(entry.estimateTokens ?? '5', 10);
-    if (!password || password.length > 256 || !Number.isInteger(limit) || limit <= 0 || !Number.isInteger(windowSeconds) || windowSeconds <= 0 || !Number.isInteger(estimateTokens) || estimateTokens <= 0 || estimateTokens > 256) throw new Error(`Application ${entry.id} has invalid quota credentials or bounds`);
-    return { id: entry.id, name: String(entry.name || entry.id).slice(0, 64), username: entry.username, password, model: entry.model, color: entry.color, limit, windowSeconds, estimateTokens };
+    const maxTokens = Number.parseInt(entry.maxTokens ?? '0', 10);
+    if (!password || password.length > 256 || !Number.isInteger(limit) || limit <= 0 || !Number.isInteger(windowSeconds) || windowSeconds <= 0 || !Number.isInteger(estimateTokens) || estimateTokens <= 0 || estimateTokens > 256 || (maxTokens && (maxTokens < estimateTokens || maxTokens > 256))) throw new Error(`Application ${entry.id} has invalid quota credentials or bounds`);
+    return { id: entry.id, name: String(entry.name || entry.id).slice(0, 64), username: entry.username, password, model: entry.model, color: entry.color, limit, windowSeconds, estimateTokens, ...(maxTokens ? { maxTokens } : {}) };
   });
 }
 const TOKEN_RATE_LIMIT_APPS = loadTokenRateLimitApps();
@@ -159,7 +167,7 @@ const TOKEN_RATE_LIMIT_HISTORY_LIMIT = 100;
 const TOKEN_RATE_LIMIT_LIVE = TOKEN_RATE_LIMIT_ENABLED
   && !TOKEN_RATE_LIMIT_FIXTURES
   && Boolean(TOKEN_RATE_LIMIT_CONSUMERS.a && TOKEN_RATE_LIMIT_CONSUMERS.b
-    && (TOKEN_RATE_LIMIT_MULTI_QUOTA ? TOKEN_RATE_LIMIT_APPS.length === 3 : TOKEN_RATE_LIMIT_PASSWORD));
+    && (TOKEN_RATE_LIMIT_MULTI_QUOTA ? TOKEN_RATE_LIMIT_APPS.length >= 2 : TOKEN_RATE_LIMIT_PASSWORD));
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 const JAEGER_URL = process.env.JAEGER_URL || 'http://localhost:16686';
@@ -238,12 +246,13 @@ function parseOptionalInteger(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function tokenRateLimitRequest(consumer, appConfig = null) {
+function tokenRateLimitRequest(consumer, appConfig = null, sessionId = null) {
   return new Promise((resolve, reject) => {
     const target = new URL(TOKEN_RATE_LIMIT_CONSUMERS[consumer]);
     const client = target.protocol === 'https:' ? https : http;
-    const requestedTokens = TOKEN_RATE_LIMIT_MIN_TOKENS
-      + Math.floor(Math.random() * (TOKEN_RATE_LIMIT_MAX_TOKENS - TOKEN_RATE_LIMIT_MIN_TOKENS + 1));
+    const maxTokens = Number.isInteger(appConfig?.maxTokens) ? appConfig.maxTokens : TOKEN_RATE_LIMIT_MAX_TOKENS;
+    const minTokens = Math.min(TOKEN_RATE_LIMIT_MIN_TOKENS, maxTokens);
+    const requestedTokens = minTokens + Math.floor(Math.random() * (maxTokens - minTokens + 1));
     const payload = JSON.stringify({
       model: appConfig?.model || TOKEN_RATE_LIMIT_MODEL,
       messages: [{ role: 'user', content: `token-rate-limit-live-${tokenRateLimitSequence + 1}` }],
@@ -262,18 +271,26 @@ function tokenRateLimitRequest(consumer, appConfig = null) {
         'Content-Length': Buffer.byteLength(payload),
         Authorization: `Basic ${Buffer.from(`${appConfig?.username || TOKEN_RATE_LIMIT_USERNAME}:${appConfig?.password || TOKEN_RATE_LIMIT_PASSWORD}`).toString('base64')}`,
         'X-Model': appConfig?.model || TOKEN_RATE_LIMIT_MODEL,
+        ...(sessionId ? { 'X-Session-Id': sessionId } : {}),
       },
     }, response => {
       let responseBody = '';
       response.on('data', chunk => { responseBody += chunk; });
       response.on('end', () => {
         let actualTokens = null;
+        let inputTokens = null;
+        let outputTokens = null;
         try {
-          actualTokens = JSON.parse(responseBody)?.usage?.total_tokens ?? null;
+          const usage = JSON.parse(responseBody)?.usage || {};
+          actualTokens = usage.total_tokens ?? null;
+          inputTokens = usage.prompt_tokens ?? usage.input_tokens ?? null;
+          outputTokens = usage.completion_tokens ?? usage.output_tokens ?? null;
         } catch {
           // Error responses are not required to use the inference response schema.
         }
-        resolve({ response, actualTokens, requestedTokens });
+        let responseModel = null;
+        try { responseModel = JSON.parse(responseBody)?.model || null; } catch { /* non-inference response */ }
+        resolve({ response, actualTokens, inputTokens, outputTokens, requestedTokens, responseModel, responseBody });
       });
     });
     request.on('error', reject);
@@ -282,9 +299,9 @@ function tokenRateLimitRequest(consumer, appConfig = null) {
   });
 }
 
-async function createTokenRateLimitRecord(consumer, appConfig = null) {
+async function createTokenRateLimitRecord(consumer, appConfig = null, options = {}) {
   const startedAt = new Date().toISOString();
-  const { response, actualTokens, requestedTokens } = await tokenRateLimitRequest(consumer, appConfig);
+  const { response, actualTokens, inputTokens, outputTokens, requestedTokens, responseModel } = await tokenRateLimitRequest(consumer, appConfig, options.session_id || null);
   tokenRateLimitSequence += 1;
   const status = response.statusCode || 0;
   const provider = response.headers['x-ai-demo-provider-gateway']
@@ -295,8 +312,15 @@ async function createTokenRateLimitRecord(consumer, appConfig = null) {
   const remaining = parseOptionalInteger(rateLimitHeader(response.headers, 'x-ratelimit-remaining'));
   const resetSeconds = parseOptionalInteger(rateLimitHeader(response.headers, 'x-ratelimit-reset'));
   const retryAfter = parseOptionalInteger(rateLimitHeader(response.headers, 'retry-after'));
+  const governance = typeof response.headers['x-ratelimit-governance'] === 'string'
+    ? response.headers['x-ratelimit-governance'] : null;
   const admitted = status >= 200 && status < 300;
   const unavailable = status === 503;
+  const quotaDenied = status === 429 || status === 529;
+  const externalProvider = Boolean(response.headers['x-openai-proxy-wasm']);
+  const gatewayLabel = provider
+    ? `${String(provider).replace(/\b\w/g, letter => letter.toUpperCase())} provider gateway`
+    : 'OpenAI provider gateway';
   const reservationEstimate = appConfig?.estimateTokens || 5;
   const settlementAdjustment = actualTokens === null ? null : reservationEstimate - actualTokens;
   const record = {
@@ -306,8 +330,8 @@ async function createTokenRateLimitRecord(consumer, appConfig = null) {
     model: appConfig?.model || TOKEN_RATE_LIMIT_MODEL,
     application: appConfig?.id || null,
     color: appConfig?.color || null,
-    consumer_gateway: `consumer-gateway-${consumer}`,
-    admission: admitted ? 'admitted' : unavailable ? 'unavailable' : 'denied',
+    consumer_gateway: TOKEN_RATE_LIMIT_CONSUMER_LABELS[consumer] || `Consumer Gateway ${consumer.toUpperCase()}`,
+    admission: admitted ? 'admitted' : unavailable ? 'unavailable' : quotaDenied ? 'denied' : 'provider_error',
     quota: {
       backend: 'Valkey (shared)',
       limit,
@@ -323,20 +347,28 @@ async function createTokenRateLimitRecord(consumer, appConfig = null) {
           : settlementAdjustment < 0 ? 'overage' : 'exact',
       refund_tokens: settlementAdjustment > 0 ? settlementAdjustment : 0,
       overage_tokens: settlementAdjustment < 0 ? Math.abs(settlementAdjustment) : 0,
+      governance,
     },
     requested_tokens: requestedTokens,
+    response_model: responseModel,
+    external_provider: externalProvider,
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    session_id: options.session_id || null,
     route: {
       provider_gateway: provider,
       overlay_revision: response.headers['x-grid-overlay-revision'] || null,
       hops: admitted && provider
-        ? ['client', `consumer-gateway-${consumer}`, 'quota-admitted', provider, TOKEN_RATE_LIMIT_BACKEND_LABEL]
-        : ['client', `consumer-gateway-${consumer}`, unavailable ? 'quota-unavailable' : 'quota-denied'],
+        ? externalProvider
+          ? ['client', TOKEN_RATE_LIMIT_CONSUMER_LABELS[consumer] || `Consumer Gateway ${consumer.toUpperCase()}`, 'quota-admitted', gatewayLabel, 'OpenAI route', 'api.openai.com']
+          : ['client', TOKEN_RATE_LIMIT_CONSUMER_LABELS[consumer] || `Consumer Gateway ${consumer.toUpperCase()}`, 'quota-admitted', provider, TOKEN_RATE_LIMIT_BACKEND_LABEL]
+        : ['client', TOKEN_RATE_LIMIT_CONSUMER_LABELS[consumer] || `Consumer Gateway ${consumer.toUpperCase()}`, unavailable ? 'quota-unavailable' : quotaDenied ? 'quota-denied' : 'provider-error'],
     },
     http: { status, method: 'POST', path: '/v1/chat/completions' },
     trace: { trace_id: null, jaeger_url: null, spans: [] },
     started_at: startedAt,
     error: admitted ? null : {
-      type: unavailable ? 'quota_backend_unavailable' : 'quota_exhausted',
+      type: unavailable ? 'quota_backend_unavailable' : quotaDenied ? 'quota_exhausted' : 'provider_upstream_error',
       retry_after_seconds: retryAfter,
     },
   };
@@ -345,12 +377,22 @@ async function createTokenRateLimitRecord(consumer, appConfig = null) {
   record.principal = appConfig?.username || TOKEN_RATE_LIMIT_USERNAME;
   record.quota.configured_limit = appConfig?.limit || TOKEN_RATE_LIMIT_CONFIGURED_LIMIT;
   record.quota.window_seconds = appConfig?.windowSeconds || TOKEN_RATE_LIMIT_WINDOW_SECONDS;
+  if (appConfig) {
+    const windowStart = Date.now() - appConfig.windowSeconds * 1000;
+    const observedUsed = tokenRateLimitHistory
+      .filter(item => item.application === appConfig.id && Date.parse(item.started_at) >= windowStart)
+      .reduce((total, item) => total + (item.quota.actual_tokens || 0), 0);
+    record.quota.remaining = Math.max(0, appConfig.limit - observedUsed);
+    record.quota.governance = observedUsed > appConfig.limit
+      ? 'over_allocation'
+      : observedUsed >= appConfig.limit * 0.8 ? 'approaching' : 'within';
+  }
   return record;
 }
 
 function liveTokenRateLimitData() {
   const providerDistribution = {};
-  const consumerDistribution = { 'consumer-gateway-a': 0, 'consumer-gateway-b': 0 };
+  const consumerDistribution = { [TOKEN_RATE_LIMIT_CONSUMER_LABELS.a]: 0, [TOKEN_RATE_LIMIT_CONSUMER_LABELS.b]: 0 };
   for (const item of tokenRateLimitHistory) {
     consumerDistribution[item.consumer_gateway] = (consumerDistribution[item.consumer_gateway] || 0) + 1;
     if (item.route.provider_gateway) {
@@ -364,7 +406,7 @@ function liveTokenRateLimitData() {
     const activeItems = items.filter(item => Date.parse(item.started_at) >= windowStart);
     const used = activeItems.reduce((total, item) => total + (item.quota.actual_tokens || 0), 0);
     const earliestExpiry = activeItems.map(item => Date.parse(item.started_at) + app.windowSeconds * 1000).filter(Number.isFinite).sort((a, b) => a - b)[0] || null;
-    return { id: app.id, name: app.name, username: app.username, model: app.model, color: app.color, limit: app.limit, estimate_tokens: app.estimateTokens, window_seconds: app.windowSeconds, used, raw_remaining: Math.max(0, app.limit - used), remaining: latest?.quota.remaining ?? Math.max(0, app.limit - used), next_expiry: latest?.quota.reset_at || (earliestExpiry ? new Date(earliestExpiry).toISOString() : null), admitted: items.filter(item => item.admission === 'admitted').length, denied: items.filter(item => item.admission === 'denied').length };
+    return { id: app.id, name: app.name, username: app.username, model: app.model, color: app.color, limit: app.limit, estimate_tokens: app.estimateTokens, window_seconds: app.windowSeconds, used, raw_remaining: Math.max(0, app.limit - used), remaining: latest?.quota.remaining ?? Math.max(0, app.limit - used), governance: used > app.limit ? 'over_allocation' : used >= app.limit * 0.8 ? 'approaching' : 'within', next_expiry: latest?.quota.reset_at || (earliestExpiry ? new Date(earliestExpiry).toISOString() : null), admitted: items.filter(item => item.admission === 'admitted').length, denied: items.filter(item => item.admission === 'denied').length };
   });
   return {
     profile: 'token-rate-limit',
@@ -372,6 +414,7 @@ function liveTokenRateLimitData() {
     principal: TOKEN_RATE_LIMIT_USERNAME,
     model: TOKEN_RATE_LIMIT_MODEL,
     multi_quota: TOKEN_RATE_LIMIT_MULTI_QUOTA,
+    cloud_burst: TOKEN_CLOUD_BURST,
     apps,
     quota: {
       backend: 'Valkey (shared)',
@@ -395,7 +438,7 @@ function liveTokenRateLimitData() {
         calendar_window: 'Not implemented',
       },
     },
-    consumers: ['consumer-gateway-a', 'consumer-gateway-b'],
+    consumers: [TOKEN_RATE_LIMIT_CONSUMER_LABELS.a, TOKEN_RATE_LIMIT_CONSUMER_LABELS.b],
     consumer_distribution: consumerDistribution,
     provider_distribution: providerDistribution,
     timeline: tokenRateLimitHistory.map(item => ({
@@ -1125,7 +1168,7 @@ function tokenOverlayProviders() {
     const provider = item.route?.provider_gateway;
     if (provider) hits.set(provider, (hits.get(provider) || 0) + 1);
   }
-  return candidates.slice(0, 3).map((candidate, index) => {
+  return candidates.map((candidate, index) => {
     const identity = [candidate.site, candidate.cluster, candidate.name, candidate.stable_id]
       .filter(Boolean);
     const observedHits = identity.reduce((count, key) => count + (hits.get(key) || 0), 0);
@@ -1134,6 +1177,8 @@ function tokenOverlayProviders() {
       name: candidate.name || candidate.site,
       site: candidate.site || null,
       cluster: candidate.cluster || null,
+      external: Boolean(candidate.external || candidate.backend_kind === 'api_provider' || candidate.backend_kind === 'cloud_managed' || /openai|bedrock|cloud/i.test(`${candidate.cluster || ''} ${candidate.site || ''}`)),
+      backend_kind: candidate.backend_kind || null,
       stable_id: candidate.stable_id || null,
       admission_state: candidate.admission_state || null,
       selection_group: candidate.selection_group ?? 0,
@@ -2790,6 +2835,844 @@ app.get('/api/vcr/timeline', async (req, res) => {
   }
   const events = vcrTimelineFromEvidence(evidence);
   res.json({ mode: 'replay', source: 'vcr-epp', events });
+});
+
+// ---------------------------------------------------------------------------
+// Cloud-burst live status + load control (reads the running kind/OpenShift
+// deployment via kubectl). Env-gated so other profiles are unaffected.
+// ---------------------------------------------------------------------------
+const CB_CONTEXT = process.env.TRACING_UI_CB_CONTEXT || null;
+const CB_NS = process.env.TRACING_UI_CB_NAMESPACE || 'grid-system';
+const CB_OVERLAY_CM = process.env.TRACING_UI_CB_OVERLAY_CONFIGMAP
+  || 'grid-overlay-grid-token-rate-limit-consumer-gateway-a';
+const CB_CONSUMER_CONFIGS = {
+  a: process.env.TRACING_UI_CB_CONSUMER_A_CONFIGMAP || 'consumer-gateway-a-config',
+  b: process.env.TRACING_UI_CB_CONSUMER_B_CONFIGMAP || 'consumer-gateway-b-config',
+};
+const CB_DEFAULT_ALLOCATIONS = { alice: 60, bob: 5000, default: 5000 };
+const CB_QUEUE_METRIC = process.env.TRACING_UI_CB_QUEUE_METRIC || 'inference_pool_average_queue_size';
+const CB_EXTERNAL_TARGET = process.env.TRACING_UI_CB_EXTERNAL_TARGET || 'api.openai.com';
+const CB_LOAD_DEPLOY = process.env.TRACING_UI_CB_LOAD_DEPLOY || 'epp-load';
+const CB_NETWORK = process.env.TRACING_UI_CB_NETWORK || 'grid-token-rate-limit';
+const CB_LOCAL_PROVIDER_NAMES = (process.env.TRACING_UI_CB_LOCAL_PROVIDERS || 'static-a,static-b,static-c').split(',').map(value => value.trim()).filter(Boolean);
+const CB_SIM_PROVIDER_NAMES = (process.env.TRACING_UI_CB_SIM_PROVIDERS || 'static-sim-a,static-sim-b,static-sim-c').split(',').map(value => value.trim()).filter(Boolean);
+const CB_LOCAL_PROVIDER_KEYS = CB_LOCAL_PROVIDER_NAMES.map((_, index) => String.fromCharCode(97 + index));
+const CB_CONSUMER_DEPLOYS = {
+  a: process.env.TRACING_UI_CB_CONSUMER_A_DEPLOY || 'consumer-gateway-a',
+  b: process.env.TRACING_UI_CB_CONSUMER_B_DEPLOY || 'consumer-gateway-b',
+};
+const CB_GPU_METRIC_TARGETS = (process.env.TRACING_UI_CB_GPU_METRIC_TARGETS
+  || 'east=rhoai-qwen3b-east-predictor.grid-cloud-burst-rhoai.svc.cluster.local:8080,west=rhoai-qwen3b-west-predictor.grid-cloud-burst-rhoai.svc.cluster.local:8080')
+  .split(',').map(value => value.trim()).filter(Boolean).map(value => {
+    const [provider, target] = value.split('=');
+    return { provider, target };
+  });
+
+// Backend-sensitivity presets. "sim" is the kind mock (llm-d-inference-sim) with
+// a deep waiting queue, so it needs heavy load to saturate. "gpu" mirrors a real
+// vLLM pool that saturates and flips admission at a much smaller queue, so it
+// bursts on far less pressure. The dropdown on the load generator picks the mode;
+// each preset sets BOTH the gauge capacity (visualization) and the generator
+// replica count (how much load "Simulate load" applies). For a real GPU deploy,
+// set Grid's scoring capacity to match TRACING_UI_CB_QUEUE_CAPACITY_GPU so the
+// actual admission flip lines up with the gauge.
+const CB_QUEUE_CAPACITY = Number.parseInt(process.env.TRACING_UI_CB_QUEUE_CAPACITY || '8', 10);
+const CB_QUEUE_CAPACITY_GPU = Number.parseInt(process.env.TRACING_UI_CB_QUEUE_CAPACITY_GPU || '2', 10);
+const CB_LOAD_REPLICAS = process.env.TRACING_UI_CB_LOAD_REPLICAS || '3';
+const CB_LOAD_REPLICAS_GPU = process.env.TRACING_UI_CB_LOAD_REPLICAS_GPU || '1';
+const CB_DEFAULT_MODE = (process.env.TRACING_UI_CB_MODE || 'sim').toLowerCase() === 'gpu' ? 'gpu' : 'sim';
+const CB_PRICING_REVISION = process.env.TRACING_UI_CB_PRICING_REVISION || 'demo-pricing-unverified';
+const CB_PRICING_MODEL = process.env.TRACING_UI_CB_PRICING_MODEL || 'gpt-4o-mini';
+const CB_INPUT_MICROS_PER_MILLION = Number.parseInt(process.env.TRACING_UI_CB_PRICING_INPUT_MICROS || '150000', 10);
+const CB_OUTPUT_MICROS_PER_MILLION = Number.parseInt(process.env.TRACING_UI_CB_PRICING_OUTPUT_MICROS || '600000', 10);
+const CB_CACHED_INPUT_MICROS_PER_MILLION = Number.parseInt(process.env.TRACING_UI_CB_PRICING_CACHED_INPUT_MICROS || '75000', 10);
+const CB_CONTROL_SCRIPT = process.env.TRACING_UI_CB_CONTROL_SCRIPT || null;
+const CB_CONTROL_TIMEOUT = 15000;
+const CB_LOGICAL_MODEL = process.env.TRACING_UI_CB_MODEL || 'gpt-4o-mini';
+const CB_TRAFFIC_PRINCIPAL = process.env.TRACING_UI_CB_PRINCIPAL || TOKEN_RATE_LIMIT_USERNAME;
+const CB_TRAFFIC_PASSWORD = process.env.TRACING_UI_CB_PASSWORD || TOKEN_RATE_LIMIT_PASSWORD;
+const CB_TRAFFIC_LIMIT = Math.min(1000, Math.max(1, Number.parseInt(process.env.TRACING_UI_CB_TRAFFIC_LIMIT || '100', 10)));
+const CB_MODES = {
+  sim: { label: 'Simulation (kind)', capacity: CB_QUEUE_CAPACITY, replicas: Number.parseInt(CB_LOAD_REPLICAS, 10) },
+  gpu: { label: 'Real GPU', capacity: CB_QUEUE_CAPACITY_GPU, replicas: Number.parseInt(CB_LOAD_REPLICAS_GPU, 10) },
+};
+const cbMode = (m) => (m === 'gpu' || m === 'sim' ? m : CB_DEFAULT_MODE);
+let cbCostCache = { expires: 0, value: null, pending: null };
+const cloudBurstTrafficHistory = [];
+let cloudBurstTrafficSequence = 0;
+let cloudBurstPressureJob = null;
+const cloudBurstControlState = {
+  metrics: { a: 0, b: 0, c: 0 },
+  health: { a: 'healthy', b: 'healthy', c: 'healthy' },
+  weights: { a: 50, b: 30, c: 20 },
+  overflow_weights: { openai: 25, bedrock: 75 },
+  overflow_health: { openai: 'healthy', bedrock: 'healthy' },
+  allocation: { principal: CB_TRAFFIC_PRINCIPAL, limit: null, enforcement: 'soft', revision: 0 },
+  last_action: null,
+};
+
+function cbNumeric(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function cbHttpText(target, path, timeout = 5000) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(`http://${target}${path}`);
+    const request = http.get({ hostname: url.hostname, port: url.port, path: url.pathname, timeout }, response => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', chunk => { body += chunk; });
+      response.on('end', () => response.statusCode === 200 ? resolve(body) : reject(new Error(`metrics returned ${response.statusCode}`)));
+    });
+    request.on('timeout', () => request.destroy(new Error('metrics request timed out')));
+    request.on('error', reject);
+  });
+}
+
+async function cbReadGpuMetrics() {
+  const values = [];
+  for (const target of CB_GPU_METRIC_TARGETS) {
+    try {
+      const body = await cbHttpText(target.target, '/metrics');
+      const read = (name) => {
+        const line = body.split('\n').find(item => item.startsWith(`${name}{`) || item.startsWith(`${name} `));
+        return line ? Number.parseFloat(line.trim().split(/\s+/).pop()) : null;
+      };
+      values.push({ provider: target.provider, waiting: read('vllm:num_requests_waiting'), running: read('vllm:num_requests_running'), kv_cache: read('vllm:kv_cache_usage_perc') });
+    } catch { values.push({ provider: target.provider, waiting: null, running: null, kv_cache: null }); }
+  }
+  return values;
+}
+
+function cbSpanNumber(request, names) {
+  for (const span of request?.spans || []) {
+    for (const tag of span.tags || []) {
+      if (names.includes(tag.key)) {
+        const value = cbNumeric(tag.value);
+        if (value !== null) return value;
+      }
+    }
+  }
+  return null;
+}
+
+function cbCloudProvider(provider) {
+  return /openai|cloud|external/i.test(String(provider || ''));
+}
+
+function cbCloudProviderName(provider) {
+  const value = String(provider || '').toLowerCase();
+  if (value.includes('bedrock')) return 'bedrock';
+  if (value.includes('openai')) return 'openai';
+  return value.includes('cloud') || value.includes('external') ? 'cloud' : null;
+}
+
+const CB_OPENAI_PROVIDERS = ['static-openai-a', 'static-openai-b', 'static-openai-c'];
+
+function cbOverflowOpenAiWeights(total) {
+  // Keep the three egress paths in the same 8/8/9 relative split used by the
+  // topology while exposing one aggregate OpenAI overflow weight to the UI.
+  if (!Number.isInteger(total) || total < CB_OPENAI_PROVIDERS.length) return null;
+  const first = Math.max(1, Math.round(total * 8 / 25));
+  const second = Math.max(1, Math.round(total * 8 / 25));
+  const third = total - first - second;
+  return third >= 1 ? [first, second, third] : null;
+}
+
+async function cbPatchOverflowWeights(openai, bedrock) {
+  const openaiWeights = cbOverflowOpenAiWeights(openai);
+  if (!openaiWeights) throw new Error('OpenAI overflow weight must be at least 3 for three egress paths');
+  for (const [index, name] of CB_OPENAI_PROVIDERS.entries()) {
+    await cbKubectl(['patch', 'inferenceprovider', name, '--type=merge', '-p', JSON.stringify({ spec: { capacityWeight: openaiWeights[index] } })]);
+  }
+  const bedrockProvider = process.env.TRACING_UI_CB_BEDROCK_PROVIDER || 'static-bedrock';
+  await cbKubectl(['patch', 'inferenceprovider', bedrockProvider, '--type=merge', '-p', JSON.stringify({ spec: { capacityWeight: bedrock } })]);
+}
+
+async function cbPatchOverflowHealth(provider, state) {
+  const path = state === 'healthy' ? '/health' : '/__cloud_burst_unhealthy__';
+  const names = provider === 'bedrock'
+    ? [process.env.TRACING_UI_CB_BEDROCK_PROVIDER || 'static-bedrock']
+    : CB_OPENAI_PROVIDERS;
+  for (const name of names) {
+    await cbKubectl(['patch', 'inferenceprovider', name, '--type=merge', '-p', JSON.stringify({ spec: { healthCheck: { path } } })]);
+  }
+}
+
+async function readCloudBurstCost() {
+  if (!TOKEN_CLOUD_BURST || !CB_CONTEXT) return { enabled: false };
+  const now = Date.now();
+  if (cbCostCache.value && cbCostCache.expires > now) return cbCostCache.value;
+  if (cbCostCache.pending) return cbCostCache.pending;
+  cbCostCache.pending = (async () => {
+    let requests = [];
+    try {
+      requests = (await normalizedRequestDataset()).slice(0, 200);
+    } catch {
+      // The cost view remains explicit about unavailable telemetry.
+    }
+    requests = [...cloudBurstTrafficHistory.map(item => ({
+      started_at: item.at,
+      provider: item.provider,
+      cloud: item.cloud,
+      trace_id: item.trace_id,
+      input_tokens: item.input_tokens,
+      output_tokens: item.output_tokens,
+      total_tokens: item.total_tokens,
+      status: item.status,
+    })), ...requests];
+    const observed = requests.map(request => {
+      const provider = request.provider || request.selected_provider || request.selected_site || null;
+      const input = cbNumeric(request.input_tokens) ?? cbSpanNumber(request, ['usage.input_tokens', 'tokens.input', 'gen_ai.usage.input_tokens']);
+      const output = cbNumeric(request.output_tokens) ?? cbSpanNumber(request, ['usage.output_tokens', 'tokens.output', 'gen_ai.usage.output_tokens']);
+      const total = cbNumeric(request.total_tokens);
+      return {
+        at: request.started_at || request.timestamp || null,
+        provider,
+        cloud: request.cloud === true || cbCloudProvider(provider),
+        trace_id: request.trace_id || request.trace?.trace_id || null,
+        input_tokens: input ?? (request.cloud === true ? null : total),
+        output_tokens: output ?? (request.cloud === true ? null : 0),
+        status: request.status || request.http?.status || null,
+        estimated: input === null || output === null,
+      };
+    }).filter(item => item.at);
+    const withUsage = observed.filter(item => item.input_tokens !== null && item.output_tokens !== null);
+    const sum = (items, field) => items.reduce((total, item) => total + (item[field] || 0), 0);
+    const cloud = withUsage.filter(item => item.cloud);
+    const local = withUsage.filter(item => !item.cloud);
+    const costMicros = items => sum(items, 'input_tokens') * CB_INPUT_MICROS_PER_MILLION / 1e6
+      + sum(items, 'output_tokens') * CB_OUTPUT_MICROS_PER_MILLION / 1e6;
+    const actualCost = costMicros(cloud);
+    const allCloudCost = costMicros([...cloud, ...local]);
+    const first = Date.now() - 60 * 60 * 1000;
+    const recent = withUsage.filter(item => Date.parse(item.at) >= first);
+    const recentCloud = recent.filter(item => item.cloud);
+    const providerTotals = {};
+    for (const item of cloud) {
+      const name = cbCloudProviderName(item.provider) || 'cloud';
+      const entry = providerTotals[name] || { provider: name, hits: 0, input_tokens: 0, output_tokens: 0, cost_micros: 0 };
+      entry.hits += 1;
+      entry.input_tokens += item.input_tokens || 0;
+      entry.output_tokens += item.output_tokens || 0;
+      entry.cost_micros += costMicros([item]);
+      providerTotals[name] = entry;
+    }
+    const buckets = new Map();
+    for (const item of recent) {
+      const at = Date.parse(item.at);
+      if (!Number.isFinite(at)) continue;
+      const bucket = new Date(Math.floor(at / 60000) * 60000).toISOString();
+      const entry = buckets.get(bucket) || { at: bucket, local_hits: 0, cloud_hits: 0, cloud_cost_micros: 0 };
+      if (item.cloud) { entry.cloud_hits += 1; entry.cloud_cost_micros += costMicros([item]); }
+      else entry.local_hits += 1;
+      buckets.set(bucket, entry);
+    }
+    const value = {
+      enabled: true,
+      source: 'observed traces and gateway evidence',
+      telemetry_quality: withUsage.length
+        ? (withUsage.some(item => item.estimated) ? 'cloud usage real; local usage estimated' : 'token-type usage observed')
+        : 'token-type usage unavailable',
+      pricing: { revision: CB_PRICING_REVISION, model: CB_PRICING_MODEL, currency: 'USD', input_micros_per_million: CB_INPUT_MICROS_PER_MILLION, output_micros_per_million: CB_OUTPUT_MICROS_PER_MILLION, cached_input_micros_per_million: CB_CACHED_INPUT_MICROS_PER_MILLION },
+      cloud_hits: cloud.length,
+      local_hits: local.length,
+      cloud_input_tokens: withUsage.length ? sum(cloud, 'input_tokens') : null,
+      cloud_output_tokens: withUsage.length ? sum(cloud, 'output_tokens') : null,
+      cloud_cost_micros: withUsage.length ? Math.round(actualCost) : null,
+      all_cloud_cost_micros: withUsage.length ? Math.round(allCloudCost) : null,
+      saved_vs_all_cloud_micros: withUsage.length ? Math.max(0, Math.round(allCloudCost - actualCost)) : null,
+      cloud_providers: Object.values(providerTotals).map(entry => ({ ...entry, cost_micros: Math.round(entry.cost_micros) })),
+      recent_cloud_hits: recentCloud.slice(0, 20).map(item => ({ at: item.at, trace_id: item.trace_id, input_tokens: item.input_tokens, output_tokens: item.output_tokens, cost_micros: Math.round(costMicros([item])) })),
+      timeline: [...buckets.values()].slice(-60),
+      limitations: withUsage.length ? [] : ['The available routing evidence does not expose separate input/output token counts yet. Spend and savings are withheld until token-type usage is observed.'],
+    };
+    cbCostCache = { expires: Date.now() + 2000, value, pending: null };
+    return value;
+  })().finally(() => { cbCostCache.pending = null; });
+  return cbCostCache.pending;
+}
+
+async function cbKubectl(args, timeout = 8000) {
+  const contextArgs = CB_CONTEXT === 'in-cluster' ? [] : ['--context', CB_CONTEXT];
+  const { stdout } = await execFileAsync('kubectl', [...contextArgs, '-n', CB_NS, ...args], { timeout });
+  return stdout;
+}
+
+function cbRequireControl(res) {
+  if (!TOKEN_CLOUD_BURST || !CB_CONTEXT) {
+    res.status(404).json({ enabled: false, error: 'cloud-burst controls are disabled' });
+    return false;
+  }
+  return true;
+}
+
+function cbProvider(value) {
+  const provider = String(value);
+  return CB_LOCAL_PROVIDER_KEYS.includes(provider) ? provider : null;
+}
+
+function cbLocalProviderName(provider) {
+  const index = CB_LOCAL_PROVIDER_KEYS.indexOf(String(provider));
+  return index >= 0 ? CB_LOCAL_PROVIDER_NAMES[index] : null;
+}
+
+function cbSimProviderName(provider) {
+  const index = CB_LOCAL_PROVIDER_KEYS.indexOf(String(provider));
+  return index >= 0 ? CB_SIM_PROVIDER_NAMES[index] : null;
+}
+
+async function cbReconcile() {
+  await cbKubectl(['annotate', 'gridnetwork', CB_NETWORK, `grid.praxis-proxy.io/force-reconcile=${Date.now()}`, '--overwrite']);
+}
+
+async function cbRunMetric(provider, queue) {
+  const providerName = cbSimProviderName(provider);
+  if (!providerName) throw new Error(`unknown configured local provider: ${provider}`);
+  const name = `${providerName}-config`;
+  const document = JSON.parse(await cbKubectl(['get', 'configmap', name, '-o', 'json']));
+  const source = document?.data?.['config.yaml'];
+  if (typeof source !== 'string') throw new Error(`${name} config.yaml is unavailable`);
+  const updated = source.replace(/waiting-requests:\s*[^\n]*/, `waiting-requests: ${queue}`);
+  await cbKubectl([
+    'patch', 'configmap', name, '--type=merge',
+    '-p', JSON.stringify({ data: { 'config.yaml': updated } }),
+  ], CB_CONTROL_TIMEOUT);
+  await cbKubectl(['rollout', 'restart', `deploy/${providerName}`], CB_CONTROL_TIMEOUT);
+  await new Promise(resolve => setTimeout(resolve, 20000));
+  cloudBurstControlState.metrics[provider] = queue;
+}
+
+async function cbRunMetrics(values) {
+  for (const [provider, queue] of Object.entries(values)) {
+    const providerName = cbSimProviderName(provider);
+    if (!providerName) continue;
+    const name = `${providerName}-config`;
+    const document = JSON.parse(await cbKubectl(['get', 'configmap', name, '-o', 'json']));
+    const source = document?.data?.['config.yaml'];
+    if (typeof source !== 'string') throw new Error(`${name} config.yaml is unavailable`);
+    const updated = source.replace(/waiting-requests:\s*[^\n]*/, `waiting-requests: ${queue}`);
+    await cbKubectl([
+      'patch', 'configmap', name, '--type=merge',
+      '-p', JSON.stringify({ data: { 'config.yaml': updated } }),
+    ], CB_CONTROL_TIMEOUT);
+  }
+  for (const provider of Object.keys(values)) {
+    const providerName = cbSimProviderName(provider);
+    if (providerName) await cbKubectl(['rollout', 'restart', `deploy/${providerName}`], CB_CONTROL_TIMEOUT);
+  }
+  await new Promise(resolve => setTimeout(resolve, 20000));
+  Object.assign(cloudBurstControlState.metrics, values);
+}
+
+async function cbResetMetrics() {
+  // Keep reset in the server's in-cluster control path.  The older helper
+  // shell script assumes a host kubectl context and is not reliable from an
+  // OpenShift UI pod.  Reset every simulator independently, then restart it so
+  // the zero gauge is observable before the next Grid reconcile.
+  for (const provider of CB_LOCAL_PROVIDER_KEYS) {
+    const providerName = cbSimProviderName(provider);
+    if (!providerName) continue;
+    const name = `${providerName}-config`;
+    const document = JSON.parse(await cbKubectl(['get', 'configmap', name, '-o', 'json']));
+    const source = document?.data?.['config.yaml'];
+    if (typeof source !== 'string') throw new Error(`${name} config.yaml is unavailable`);
+    const updated = source.replace(/waiting-requests:\s*[^\n]*/, 'waiting-requests: 0');
+    await cbKubectl([
+      'patch', 'configmap', name, '--type=merge',
+      '-p', JSON.stringify({ data: { 'config.yaml': updated } }),
+    ], CB_CONTROL_TIMEOUT);
+    await cbKubectl(['rollout', 'restart', `deploy/${providerName}`], CB_CONTROL_TIMEOUT);
+  }
+  await new Promise(resolve => setTimeout(resolve, 20000));
+  cloudBurstControlState.metrics = { a: 0, b: 0, c: 0 };
+}
+
+async function cbStopAllPressure() {
+  if (cloudBurstPressureJob) cloudBurstPressureJob.cancelled = true;
+  await cbResetMetrics();
+  // A GPU pressure deployment is optional on simulator-backed installs.
+  // Absence is expected and must not make the stop control fail.
+  try { await cbKubectl(['scale', 'deploy/epp-load', '--replicas=0'], CB_CONTROL_TIMEOUT); } catch { /* optional */ }
+  await cbReconcile();
+}
+
+function cbAllocationYaml(source, policy) {
+  source = source.replace(/^\s*# allocationRevision: [^\n]+\n/gm, '');
+  if (!source.includes('  - filter: token_rate_limit')) {
+    throw new Error('token_rate_limit filter is not present in the consumer configuration');
+  }
+  // The limiter schema is strict: update only fields owned by the actual
+  // token_rate_limit filter. Keep the revision as a comment so it can be
+  // observed by the demo without becoming an unknown filter field.
+  const marker = source.indexOf('  - filter: token_rate_limit');
+  const start = marker < 0 ? -1 : source.lastIndexOf('\n', marker) + 1;
+  const nextFilter = start < 0 ? -1 : source.slice(start + 1).search(/\n\s+- filter:/);
+  const end = nextFilter < 0 ? -1 : start + 1 + nextFilter;
+  if (start < 0 || end < 0) throw new Error('consumer configuration has no complete token filter block');
+  let block = source.slice(start, end);
+  block = block.replace(/\n        allocationPolicy:\n(?:          [^\n]*\n)*/g, '\n');
+  if (/\n    enforcement:/.test(block)) {
+    block = block.replace(/\n    enforcement: (?:hard|soft)\n/g, `\n    enforcement: ${policy.enforcement}\n`);
+  } else {
+    block = block.replace(/(\n    reservationTimeout: [^\n]+\n)/, `$1    enforcement: ${policy.enforcement}\n`);
+  }
+  if (!/\n    enforcement: (?:hard|soft)\n/.test(block)) {
+    // Rule-level enforcement is used below; the filter-level default remains
+    // unchanged for other principals.
+  }
+  const ruleMarker = `\n          - name: ${policy.principal}\n`;
+  const ruleStart = block.indexOf(ruleMarker);
+  if (ruleStart < 0) throw new Error(`consumer configuration has no rule for ${policy.principal}`);
+  const ruleEnd = block.indexOf('\n          - name:', ruleStart + ruleMarker.length);
+  const ruleLimit = ruleEnd < 0 ? block.length : ruleEnd;
+  let rule = block.slice(ruleStart, ruleLimit);
+  rule = rule.replace(/\n            enforcement: (?:hard|soft)\n/g, '\n');
+  rule = rule.replace(/(\n\s+capacity:)\s*\d+/g, `$1 ${policy.capacity}`);
+  rule = rule.replace(ruleMarker, `${ruleMarker}            enforcement: ${policy.enforcement}\n`);
+  block = `${block.slice(0, ruleStart)}${rule}${block.slice(ruleLimit)}`;
+  block = block.replace(/^\s*# allocationRevision: [^\n]+\n/gm, '');
+  block = `# allocationRevision: ${policy.revision}\n${block}`;
+  return `${source.slice(0, start)}${block}${source.slice(end)}`;
+}
+
+function cbRemoveAllocationYaml(source) {
+  source = source.replace(/^\s*# allocationRevision: [^\n]+\n/gm, '');
+  const marker = source.indexOf('  - filter: token_rate_limit');
+  const start = marker < 0 ? -1 : source.lastIndexOf('\n', marker) + 1;
+  const nextFilter = start < 0 ? -1 : source.slice(start + 1).search(/\n\s+- filter:/);
+  const end = nextFilter < 0 ? -1 : start + 1 + nextFilter;
+  if (start < 0 || end < 0) return source;
+  let block = source.slice(start, end);
+  block = block.replace(/^\s*# allocationRevision: [^\n]+\n/gm, '');
+  for (const [name, capacity] of Object.entries(CB_DEFAULT_ALLOCATIONS)) {
+    const ruleMarker = `\n          - name: ${name}\n`;
+    const ruleStart = block.indexOf(ruleMarker);
+    if (ruleStart < 0) continue;
+    const ruleEnd = block.indexOf('\n          - name:', ruleStart + ruleMarker.length);
+    const ruleLimit = ruleEnd < 0 ? block.length : ruleEnd;
+    let rule = block.slice(ruleStart, ruleLimit);
+    rule = rule.replace(/\n\s+enforcement: (?:hard|soft)\n/g, '\n');
+    rule = rule.replace(/(\n\s+capacity:)\s*\d+/g, `$1 ${capacity}`);
+    block = `${block.slice(0, ruleStart)}${rule}${block.slice(ruleLimit)}`;
+  }
+  return `${source.slice(0, start)}${block}${source.slice(end)}`;
+}
+
+async function cbPublishAllocation(policy = null) {
+  const configs = await Promise.all(['a', 'b'].map(async key => {
+    const document = JSON.parse(await cbKubectl(['get', 'configmap', CB_CONSUMER_CONFIGS[key], '-o', 'json']));
+    const source = document?.data?.['praxis.yaml'];
+    if (typeof source !== 'string') throw new Error(`consumer ${key} praxis.yaml is unavailable`);
+    return { key, source: policy ? cbAllocationYaml(source, policy) : cbRemoveAllocationYaml(source) };
+  }));
+  for (const { key, source } of configs) {
+    await cbKubectl([
+      'patch', 'configmap', CB_CONSUMER_CONFIGS[key], '--type=merge',
+      '-p', JSON.stringify({ data: { 'praxis.yaml': source } }),
+    ], CB_CONTROL_TIMEOUT);
+  }
+  return configs.map(({ key }) => key);
+}
+
+async function cbReloadObserved(revision, timeoutMs = 90000, startedAt = new Date().toISOString()) {
+  const deadline = Date.now() + timeoutMs;
+  let observations = ['a', 'b'].map(consumer => ({ consumer, reloaded: false, projected: false }));
+  while (Date.now() < deadline) {
+    observations = await Promise.all(['a', 'b'].map(async key => {
+      try {
+        const projectionCheck = revision
+          ? `grep -Fq 'allocationRevision: ${revision}' /etc/praxis/praxis.yaml`
+          : '! grep -q allocationPolicy /etc/praxis/praxis.yaml';
+        const projected = await cbKubectl([
+          'exec', `deploy/${CB_CONSUMER_DEPLOYS[key]}`, '-c', 'praxis', '--',
+          'sh', '-c', projectionCheck,
+        ], 8000).then(() => true).catch(() => false);
+        const logs = await cbKubectl(['logs', `deploy/consumer-gateway-${key}`, '-c', 'praxis', `--since-time=${startedAt}`], 8000);
+        return { consumer: key, projected, reloaded: projected && /config reload complete/.test(logs) };
+      } catch {
+        return { consumer: key, projected: false, reloaded: false };
+      }
+    }));
+    if (observations.every(item => item.reloaded)) return observations;
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+  return observations;
+}
+
+function cbQueueValue(value, preset) {
+  if (preset) {
+    if (preset === 'calm') return Math.max(0, Math.floor(CB_QUEUE_CAPACITY * 0.2));
+    // The static Kind Grid resource uses queueCapacity=10; value 9 must be
+    // above the 0.85 admission-enter threshold rather than merely at 0.8.
+    if (preset === 'pressure') return Math.max(9, Math.ceil(CB_QUEUE_CAPACITY * 0.9));
+    if (preset === 'saturate') return Math.max(CB_QUEUE_CAPACITY + 1, CB_QUEUE_CAPACITY * 2);
+    throw new Error('preset must be calm, pressure, or saturate');
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0 || number > 1000) throw new Error('metric value must be between 0 and 1000');
+  return number <= 1 ? Math.round(number * CB_QUEUE_CAPACITY) : Math.round(number);
+}
+
+async function cbTrafficRecord(consumer, sessionMode, appOverride = null) {
+  const app = appOverride || { id: 'cloud-burst', username: CB_TRAFFIC_PRINCIPAL, password: CB_TRAFFIC_PASSWORD, model: CB_LOGICAL_MODEL, estimateTokens: 5, limit: 100000, windowSeconds: 600 };
+  const sessionId = sessionMode === 'sticky'
+    ? `cloud-burst-sticky-${consumer}`
+    : `cloud-burst-${Date.now()}-${randomUUID()}`;
+  cloudBurstTrafficSequence += 1;
+  const record = await createTokenRateLimitRecord(consumer, app, { session_id: sessionId });
+  const cloud = Boolean(record.external_provider)
+    || Boolean(record.response_model && record.response_model !== CB_LOGICAL_MODEL);
+  const item = {
+    at: record.started_at,
+    request_id: record.request_id,
+    consumer: record.consumer_gateway,
+    provider: record.route.provider_gateway,
+    cloud,
+    status: record.http.status,
+    trace_id: record.trace.trace_id,
+    input_tokens: record.input_tokens,
+    output_tokens: record.output_tokens,
+    total_tokens: record.quota.actual_tokens,
+    requested_tokens: record.requested_tokens,
+    session: sessionId,
+  };
+  cloudBurstTrafficHistory.push(item);
+  if (cloudBurstTrafficHistory.length > 1000) cloudBurstTrafficHistory.shift();
+  return { ...record, cloud, session_id: sessionId };
+}
+
+async function runGpuPressureJob(job) {
+  const app = TOKEN_RATE_LIMIT_APPS[0]
+    ? { ...TOKEN_RATE_LIMIT_APPS[0], maxTokens: 128 }
+    : { id: 'cloud-burst-pressure', username: CB_TRAFFIC_PRINCIPAL, password: CB_TRAFFIC_PASSWORD, model: CB_LOGICAL_MODEL, estimateTokens: 20, maxTokens: 128, limit: 100000, windowSeconds: 600 };
+  const workers = Math.max(1, Math.min(8, job.concurrency));
+  const worker = async (workerId) => {
+    while (!job.cancelled && (Date.now() - job.started_ms) < job.duration_ms) {
+      const consumer = (job.sequence + workerId) % 2 === 0 ? 'a' : 'b';
+      job.sequence += 1;
+      try {
+        const result = await cbTrafficRecord(consumer, 'unique', app);
+        job.completed += 1;
+        if (result.http?.status >= 200 && result.http.status < 300) job.succeeded += 1;
+        else job.failed += 1;
+      } catch { job.failed += 1; }
+    }
+  };
+  await Promise.all(Array.from({ length: workers }, (_, index) => worker(index)));
+  job.running = false;
+  job.finished_at = new Date().toISOString();
+  cbCostCache = { expires: 0, value: null, pending: null };
+}
+
+app.post('/api/v1/cloud-burst/metric', async (req, res) => {
+  if (!cbRequireControl(res)) return;
+  try {
+    if (req.body?.reset === true) await cbResetMetrics();
+    else {
+      const provider = cbProvider(req.body?.provider);
+      if (!provider) return res.status(400).json({ error: 'provider must be a, b, or c' });
+      await cbRunMetric(provider, cbQueueValue(req.body?.value, req.body?.preset));
+    }
+    await cbReconcile();
+    cloudBurstControlState.last_action = { type: 'metric', at: new Date().toISOString() };
+    res.json({ ok: true, controls: cloudBurstControlState });
+  } catch (error) { res.status(503).json({ error: error.message }); }
+});
+
+app.post('/api/v1/cloud-burst/traffic', async (req, res) => {
+  if (!cbRequireControl(res)) return;
+  if (!CB_TRAFFIC_PASSWORD || !TOKEN_RATE_LIMIT_CONSUMERS.a || !TOKEN_RATE_LIMIT_CONSUMERS.b) return res.status(503).json({ error: 'server-side traffic credentials or consumers are not configured' });
+  const count = Math.min(CB_TRAFFIC_LIMIT, Math.max(1, Number.parseInt(req.body?.count ?? 1, 10) || 1));
+  const rate = Math.min(20, Math.max(0, Number(req.body?.rate ?? 0) || 0));
+  const sessionMode = req.body?.session === 'sticky' ? 'sticky' : 'unique';
+  const requestedApp = TOKEN_RATE_LIMIT_APPS.find(entry => entry.id === req.body?.app) || null;
+  const requestedConsumer = req.body?.consumer;
+  if (requestedConsumer && !['a', 'b', 'both'].includes(requestedConsumer)) return res.status(400).json({ error: 'consumer must be a, b, or both' });
+  const consumers = requestedConsumer === 'a' ? ['a'] : requestedConsumer === 'b' ? ['b'] : ['a', 'b'];
+  const results = [];
+  for (let i = 0; i < count; i += 1) {
+    const consumer = consumers[i % consumers.length];
+    try { results.push(await cbTrafficRecord(consumer, sessionMode, requestedApp)); }
+    catch (error) { results.push({ error: error.message, consumer: `consumer-gateway-${consumer}` }); }
+    if (rate > 0 && i + 1 < count) await new Promise(resolve => setTimeout(resolve, Math.ceil(1000 / rate)));
+  }
+  cbCostCache = { expires: 0, value: null, pending: null };
+  res.json({ ok: results.every(item => !item.error), count: results.length, results, cost: await readCloudBurstCost() });
+});
+
+app.post('/api/v1/cloud-burst/weights', async (req, res) => {
+  if (!cbRequireControl(res)) return;
+  const values = CB_LOCAL_PROVIDER_KEYS.map(key => Number.parseInt(req.body?.[key], 10));
+  if (values.length === 0 || values.some(value => !Number.isInteger(value) || value < 1 || value > 1000)) return res.status(400).json({ error: 'weights must be integers from 1 to 1000 for every local provider' });
+  try {
+    for (const [index, key] of CB_LOCAL_PROVIDER_KEYS.entries()) {
+      await cbKubectl(['patch', 'inferenceprovider', CB_LOCAL_PROVIDER_NAMES[index], '--type=merge', '-p', JSON.stringify({ spec: { capacityWeight: values[index] } })]);
+      cloudBurstControlState.weights[key] = values[index];
+    }
+    await cbReconcile();
+    res.json({ ok: true, controls: cloudBurstControlState });
+  } catch (error) { res.status(503).json({ error: error.message }); }
+});
+
+app.post('/api/v1/cloud-burst/overflow-weights', async (req, res) => {
+  if (!cbRequireControl(res)) return;
+  const openai = Number.parseInt(req.body?.openai, 10);
+  const bedrock = Number.parseInt(req.body?.bedrock, 10);
+  if (![openai, bedrock].every(value => Number.isInteger(value) && value >= 1 && value <= 1000) || openai < 3) {
+    return res.status(400).json({ error: 'overflow weights must be integers from 1 to 1000; OpenAI must be at least 3 for three egress paths' });
+  }
+  try {
+    await cbPatchOverflowWeights(openai, bedrock);
+    cloudBurstControlState.overflow_weights = { openai, bedrock };
+    await cbReconcile();
+    res.json({ ok: true, controls: cloudBurstControlState });
+  } catch (error) { res.status(503).json({ error: error.message, controls: cloudBurstControlState }); }
+});
+
+app.post('/api/v1/cloud-burst/overflow-health', async (req, res) => {
+  if (!cbRequireControl(res)) return;
+  const provider = req.body?.provider === 'bedrock' || req.body?.provider === 'openai' ? req.body.provider : null;
+  const state = req.body?.state;
+  if (!provider || !['healthy', 'unhealthy'].includes(state)) return res.status(400).json({ error: 'provider and healthy|unhealthy state are required' });
+  try {
+    await cbPatchOverflowHealth(provider, state);
+    cloudBurstControlState.overflow_health[provider] = state;
+    // Health probes reconcile from the changed InferenceProvider itself. Do
+    // not force a GridNetwork reconcile here: that would re-render the
+    // provider template and immediately overwrite this live health control.
+    res.json({ ok: true, controls: cloudBurstControlState });
+  } catch (error) { res.status(503).json({ error: error.message, controls: cloudBurstControlState }); }
+});
+
+app.post('/api/v1/cloud-burst/health', async (req, res) => {
+  if (!cbRequireControl(res)) return;
+  const provider = cbProvider(req.body?.provider);
+  const state = req.body?.state;
+  if (!provider || !['healthy', 'unhealthy'].includes(state)) return res.status(400).json({ error: 'provider and healthy|unhealthy state are required' });
+  try {
+    const path = state === 'healthy' ? '/health' : '/__cloud_burst_unhealthy__';
+    const providerName = cbLocalProviderName(provider);
+    if (!providerName) return res.status(400).json({ error: `unknown configured local provider: ${provider}` });
+    await cbKubectl(['patch', 'inferenceprovider', providerName, '--type=merge', '-p', JSON.stringify({ spec: { healthCheck: { path } } })]);
+    cloudBurstControlState.health[provider] = state;
+    await cbReconcile();
+    res.json({ ok: true, controls: cloudBurstControlState });
+  } catch (error) { res.status(503).json({ error: error.message }); }
+});
+
+app.post('/api/v1/cloud-burst/allocation', async (req, res) => {
+  if (!cbRequireControl(res)) return;
+  const principal = typeof req.body?.principal === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(req.body.principal) ? req.body.principal : CB_TRAFFIC_PRINCIPAL;
+  const enforcement = req.body?.enforcement === 'hard' ? 'hard' : 'soft';
+  const limit = req.body?.limit === undefined ? null : Number.parseInt(req.body.limit, 10);
+  if (req.body?.reset === true) {
+    try {
+      const reloadStartedAt = new Date().toISOString();
+      await cbPublishAllocation();
+      cloudBurstControlState.allocation = { principal: CB_TRAFFIC_PRINCIPAL, limit: null, enforcement: 'soft', revision: 0, verified: false };
+      const reload = await cbReloadObserved(null, 90000, reloadStartedAt);
+      res.json({ ok: true, controls: cloudBurstControlState, reload });
+    } catch (error) {
+      res.status(503).json({ error: error.message, controls: cloudBurstControlState });
+    }
+    return;
+  }
+  if (limit !== null && (!Number.isInteger(limit) || limit <= 0 || limit > 1000000)) return res.status(400).json({ error: 'limit must be between 1 and 1000000' });
+  if (principal !== CB_TRAFFIC_PRINCIPAL) return res.status(400).json({ error: 'only the configured bounded traffic principal is supported by this demo control', principal });
+  if (limit === null) return res.status(400).json({ error: 'limit is required for a versioned allocation policy' });
+  try {
+    const revision = `ui-${Date.now()}`;
+    const reloadStartedAt = new Date().toISOString();
+    await cbPublishAllocation({ principal, revision, capacity: limit, enforcement });
+    cloudBurstControlState.allocation = { principal, limit, enforcement, revision, verified: false };
+    const reload = await cbReloadObserved(revision, 90000, reloadStartedAt);
+    cloudBurstControlState.last_action = { type: 'allocation', at: new Date().toISOString() };
+    res.json({ ok: true, controls: cloudBurstControlState, reload, verification: 'reload observed; enforcement still requires a passing quota exercise' });
+  } catch (error) {
+    res.status(503).json({ error: error.message, controls: cloudBurstControlState });
+  }
+});
+
+app.post('/api/v1/cloud-burst/scenario', async (req, res) => {
+  if (!cbRequireControl(res)) return;
+  const id = String(req.body?.id || '');
+  const scenarios = {
+    baseline: { metrics: { a: 0, b: 0, c: 0 }, weights: { a: 50, b: 30, c: 20 } },
+    partial: { metrics: { a: 9, b: 0, c: 0 } },
+    progressive: { metrics: { a: 9, b: 9, c: 0 } },
+    full: { metrics: { a: 9, b: 9, c: 9 } },
+    recovery: { metrics: { a: 0, b: 0, c: 0 }, weights: { a: 50, b: 30, c: 20 } },
+    reweight_60_30_10: { metrics: { a: 0, b: 0, c: 0 }, weights: { a: 60, b: 30, c: 10 } },
+    reweight_equal: { metrics: { a: 0, b: 0, c: 0 }, weights: { a: 33, b: 33, c: 33 } },
+  };
+  const scenario = scenarios[id];
+  if (!scenario) return res.status(400).json({ error: 'unknown scenario', allowed: Object.keys(scenarios) });
+  try {
+    if (scenario.weights) {
+      for (const [index, key] of CB_LOCAL_PROVIDER_KEYS.entries()) await cbKubectl(['patch', 'inferenceprovider', CB_LOCAL_PROVIDER_NAMES[index], '--type=merge', '-p', JSON.stringify({ spec: { capacityWeight: scenario.weights[key] } })]);
+      cloudBurstControlState.weights = { ...scenario.weights };
+    }
+    for (const key of CB_LOCAL_PROVIDER_KEYS) await cbRunMetric(key, scenario.metrics[key] ?? 0);
+    await cbReconcile();
+    cloudBurstControlState.last_action = { type: 'scenario', id, at: new Date().toISOString() };
+    res.json({ ok: true, scenario: id, controls: cloudBurstControlState });
+  } catch (error) { res.status(503).json({ error: error.message }); }
+});
+
+app.get('/api/v1/cloud-burst', async (_req, res) => {
+  if (!TOKEN_CLOUD_BURST || !CB_CONTEXT) return res.json({ enabled: false });
+  try {
+    const raw = await cbKubectl(['get', 'configmap', CB_OVERLAY_CM, '-o',
+      'jsonpath={.data.routing-overlay\\.json}']);
+    const document = JSON.parse(raw);
+    // The Grid operator exposes the semantic overlay in routing-config.json,
+    // while the Praxis validator consumes the enveloped routing-overlay.json.
+    // Accept both shapes so the RHOAI UI reads the live operator ConfigMap.
+    const ov = document.overlay || document;
+    const overlayRevision = document.revision || null;
+    const groups = (ov.candidates || []).map((c) => {
+      // Grid overlays use `name` for the capability/model. Older demo
+      // fixtures used `model`; accept both so the live topology is driven by
+      // the actual overlay rather than a fixture-specific field.
+      const model = c.name || c.model || '';
+      const identity = `${model} ${c.site || ''} ${c.cluster || ''}`;
+      const bedrock = /bedrock/i.test(identity);
+      const openai = /openai|cloud/i.test(identity);
+      const suffix = String(c.cluster || c.site || '').match(/(?:static-)?(?:openai-)?([abc])$/i)?.[1]?.toLowerCase();
+      const external = Boolean(c.credential) || c.backend_kind === 'api_provider' || openai || bedrock;
+      return {
+        site: c.site, cluster: c.cluster, model, group: c.selection_group ?? 0,
+        admission: c.admission_state || null, tier: c.selection_tier || null,
+        external,
+        // backend_kind is intentionally not used to label cloud providers:
+        // both OpenAI and Bedrock are generic api_provider routes. The
+        // provider identity comes from the accepted candidate name.
+        provider: bedrock ? 'bedrock' : external ? 'openai' : 'local',
+        // The static resources use one provider gateway per local suffix.
+        // Bedrock is the standalone overflow endpoint attached to gateway A;
+        // it is still rendered as its own overflow candidate below that card.
+        // The live RHOAI overlay identifies the provider gateway in `cluster`.
+        // Keep that name in the UI; `static-*` is only a legacy demo fallback.
+        gateway: c.gateway || c.routing_cluster || c.cluster || (bedrock ? 'static-a' : (suffix ? `static-${suffix}` : null)),
+      };
+    });
+    const local = groups.find((g) => !g.external) || {};
+    let queue = null;
+    let gpuMetrics = [];
+    if (CB_DEFAULT_MODE === 'gpu') {
+      gpuMetrics = await cbReadGpuMetrics();
+      const waiting = gpuMetrics.map(item => item.waiting).filter(value => typeof value === 'number');
+      if (waiting.length) queue = Math.max(...waiting);
+    }
+    try {
+      const eppIp = (await cbKubectl(['get', 'pod', '-l', 'app.kubernetes.io/name=llmd-epp',
+        '-o', 'jsonpath={.items[0].status.podIP}'])).trim();
+      if (eppIp) {
+        const m = await cbKubectl(['exec', 'deploy/grid-operator', '--', 'sh', '-c',
+          `wget -qO- http://${eppIp}:9090/metrics 2>/dev/null`], 9000);
+        const line = m.split('\n').find((l) => l.startsWith(`${CB_QUEUE_METRIC}{`) || l.startsWith(`${CB_QUEUE_METRIC} `));
+        if (line) queue = Number.parseFloat(line.trim().split(/\s+/).pop());
+      }
+    } catch { /* EPP optional */ }
+    // Simulator mode has a deterministic queue value even when this
+    // deployment has no EPP metrics service. Keep the gauge aligned with the
+    // metric that drives Grid admission instead of displaying 0%/unknown.
+    if (queue == null && CB_DEFAULT_MODE === 'sim') {
+      queue = Math.max(...Object.values(cloudBurstControlState.metrics).map(Number), 0);
+    }
+    let loadReplicas = CB_DEFAULT_MODE === 'gpu' ? (cloudBurstPressureJob?.running ? cloudBurstPressureJob.concurrency : 0) : 0;
+    if (CB_DEFAULT_MODE !== 'gpu') {
+      try { loadReplicas = Number.parseInt((await cbKubectl(['get', 'deploy', CB_LOAD_DEPLOY,
+        '-o', 'jsonpath={.spec.replicas}'])).trim() || '0', 10); } catch { /* no load deploy */ }
+    }
+    const defCap = CB_MODES[CB_DEFAULT_MODE].capacity;
+    const pressure = queue != null && defCap > 0
+      ? Math.max(0, Math.min(1, queue / defCap)) : null;
+    res.json({
+      enabled: true, external_target: CB_EXTERNAL_TARGET,
+      queue_depth: queue, queue_capacity: defCap, pressure,
+      modes: CB_MODES, default_mode: CB_DEFAULT_MODE,
+      load_on: loadReplicas > 0, load_replicas: loadReplicas,
+      gpu_metrics: gpuMetrics,
+      local_admission: local.admission || null,
+      pressure_active: local.admission === 'existing_only',
+      // A recent cloud hit remains in the cost/history panels after recovery,
+      // but the live badge must describe the current routing state. Cloud
+      // burst is active only while local admission is pressured and recent
+      // traffic actually used the overflow path.
+      cloud_burst_active: local.admission === 'existing_only'
+        && cloudBurstTrafficHistory.some(item => item.cloud && Date.parse(item.at) >= Date.now() - 60_000),
+      // Compatibility for older UI clients; new clients use the explicit
+      // pressure_active/cloud_burst_active fields above.
+      burst_active: local.admission === 'existing_only'
+        && cloudBurstTrafficHistory.some(item => item.cloud && Date.parse(item.at) >= Date.now() - 60_000),
+      overlay_revision: overlayRevision, groups,
+      controls: {
+        metrics: cloudBurstControlState.metrics,
+        health: cloudBurstControlState.health,
+        weights: cloudBurstControlState.weights,
+        overflow_weights: cloudBurstControlState.overflow_weights,
+        overflow_health: cloudBurstControlState.overflow_health,
+        allocation: cloudBurstControlState.allocation,
+        last_action: cloudBurstControlState.last_action,
+      },
+    });
+  } catch (error) {
+    res.json({ enabled: true, error: String(error.message || error) });
+  }
+});
+
+app.post('/api/v1/cloud-burst/load', async (req, res) => {
+  if (!TOKEN_CLOUD_BURST || !CB_CONTEXT) return res.status(400).json({ error: 'cloud-burst not enabled' });
+  const on = req.body?.on === true || req.body?.on === 'true';
+  const mode = cbMode(req.body?.mode);
+  const replicas = on ? CB_MODES[mode].replicas : 0;
+  try {
+    if (mode === 'gpu') {
+      if (!on) {
+        if (cloudBurstPressureJob) cloudBurstPressureJob.cancelled = true;
+        return res.json({ ok: true, load_on: false, mode, replicas: 0 });
+      }
+      if (cloudBurstPressureJob?.running) return res.status(409).json({ error: 'GPU pressure is already running', job: cloudBurstPressureJob });
+      cloudBurstPressureJob = { running: true, cancelled: false, mode, concurrency: Math.max(2, replicas * 4), duration_ms: 300000, started_ms: Date.now(), started_at: new Date().toISOString(), completed: 0, succeeded: 0, failed: 0, sequence: 0 };
+      runGpuPressureJob(cloudBurstPressureJob).catch(error => { if (cloudBurstPressureJob) { cloudBurstPressureJob.running = false; cloudBurstPressureJob.error = error.message; } });
+      return res.json({ ok: true, load_on: true, mode, replicas: cloudBurstPressureJob.concurrency });
+    }
+    if (mode === 'sim') {
+      if (on) {
+        const pressureQueue = cbQueueValue(undefined, 'pressure');
+        await cbRunMetrics(Object.fromEntries(CB_LOCAL_PROVIDER_KEYS.map(provider => [provider, pressureQueue])));
+        await cbReconcile();
+        return res.json({ ok: true, load_on: true, mode, replicas: CB_MODES[mode].replicas });
+      }
+      await cbStopAllPressure();
+      return res.json({ ok: true, load_on: false, mode, replicas: 0 });
+    }
+    await cbKubectl(['scale', `deploy/${CB_LOAD_DEPLOY}`, `--replicas=${replicas}`]);
+    res.json({ ok: true, load_on: on, mode, replicas });
+  } catch (error) {
+    res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
+app.post('/api/v1/cloud-burst/stop', async (_req, res) => {
+  if (!TOKEN_CLOUD_BURST || !CB_CONTEXT) return res.status(400).json({ error: 'cloud-burst not enabled' });
+  try {
+    await cbStopAllPressure();
+    res.json({ ok: true, load_on: false, pressure: 'off' });
+  } catch (error) {
+    res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
+app.get('/api/v1/cloud-burst/cost', async (_req, res) => {
+  try {
+    res.json(await readCloudBurstCost());
+  } catch (error) {
+    res.status(503).json({ enabled: true, error: 'cloud-burst cost telemetry unavailable' });
+  }
 });
 
 // The React build owns browser routes; API misses must remain API misses.

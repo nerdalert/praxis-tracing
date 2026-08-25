@@ -1,0 +1,24 @@
+[
+  {
+    "id": "app-a",
+    "name": "App-a",
+    "username": "alice",
+    "passwordFile": "/run/secrets/token-rate-limit/app-a-password",
+    "model": "gpt-4o-mini",
+    "color": "#2f80ed",
+    "limit": 60,
+    "windowSeconds": 60,
+    "estimateTokens": 5
+  },
+  {
+    "id": "app-b",
+    "name": "App-b",
+    "username": "bob",
+    "passwordFile": "/run/secrets/token-rate-limit/app-b-password",
+    "model": "gpt-4o-mini",
+    "color": "#d98200",
+    "limit": 60,
+    "windowSeconds": 60,
+    "estimateTokens": 5
+  }
+]
