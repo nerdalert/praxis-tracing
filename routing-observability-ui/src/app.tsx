@@ -902,26 +902,18 @@ function TokenPanel() {
               </div>
             </section>
           )}
-          <div id="token-rate-limit-summary" className="quota-summary">
+          <div id="token-rate-limit-summary" className={`quota-summary${status.multi_quota ? " quota-summary-multi" : ""}`}>
             <div>
               <span>Principal / model</span>
-              <strong>
-                {status.multi_quota
-                  ? status.apps.map((app: any) => `${app.name} · ${app.model}`).join("  ·  ")
-                  : status.principal || status.username || "alice/canonical-model"}
-              </strong>
+              {status.multi_quota ? <div className="quota-summary-app-list">{status.apps.map((app: any) => <strong key={app.id}><b>{app.name}</b><small>{app.model}</small></strong>)}</div> : <strong>{status.principal || status.username || "alice/canonical-model"}</strong>}
             </div>
             <div>
               <span>Limit</span>
-              <strong>
-                {status.multi_quota ? status.apps.map((app: any) => `${app.name} ${app.limit}`).join(" · ") : `${status.quota?.configured_limit ?? status.quota?.limit ?? status.limit ?? "—"} tokens`}
-              </strong>
+              {status.multi_quota ? <div className="quota-summary-app-list">{status.apps.map((app: any) => <strong key={app.id}><b>{app.name}</b><small>{app.limit} tokens</small></strong>)}</div> : <strong>{`${status.quota?.configured_limit ?? status.quota?.limit ?? status.limit ?? "—"} tokens`}</strong>}
             </div>
             <div>
               <span>Remaining</span>
-              <strong>
-                {status.multi_quota ? "per application" : `${status.quota?.remaining ?? status.remaining ?? rows[0]?.quota?.remaining ?? "—"} tokens`}
-              </strong>
+              {status.multi_quota ? <div className="quota-summary-app-list">{status.apps.map((app: any) => <strong key={app.id}><b>{app.name}</b><small>{app.raw_remaining ?? app.remaining ?? "—"} tokens</small></strong>)}</div> : <strong>{`${status.quota?.remaining ?? status.remaining ?? rows[0]?.quota?.remaining ?? "—"} tokens`}</strong>}
             </div>
             <div>
               <span>Backend</span>

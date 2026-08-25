@@ -816,6 +816,13 @@ label input {
   margin-top: 4px;
   font-size: 12px;
 }
+.quota-summary-multi > div { min-width: 0; }
+.quota-summary-multi > div > span { color: var(--fg); font-size: 11px; font-weight: 700; }
+.quota-summary-app-list { display: grid; gap: 5px; margin-top: 6px; }
+.quota-summary-app-list strong { display: grid; grid-template-columns: max-content 1fr; gap: 7px; align-items: baseline; margin: 0; font-size: 12px; }
+.quota-summary-app-list b { color: var(--fg); font-weight: 700; }
+.quota-summary-app-list small { color: var(--fg); font: 12px "IBM Plex Mono", monospace; white-space: nowrap; }
+.quota-summary-multi > div:last-child strong { color: var(--fg); }
 .quota-policy-view {
   margin: 16px 0;
   padding: 12px;
@@ -1263,10 +1270,10 @@ label input {
 .cb-controls { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; margin: 12px 0; }
 .cb-controls .cb-load-on { background: #e11; }
 .cb-control-error { margin: 8px 0; padding: 8px 10px; border-left: 3px solid #d98200; color: #8a5600; background: #fff8e8; font-size: 12px; }
-.cb-mode { display: grid; gap: 2px; font-size: 12px; color: var(--muted, #666); }
+.cb-mode { display: grid; gap: 2px; font-size: 12px; color: var(--fg, #171717); }
 .cb-mode select { font-size: 13px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border, #d7d7d7); background: var(--card, #fff); color: var(--fg, #171717); }
 body.theme-dark .cb-mode select { background: #1b1d20; color: #e6e6e6; border-color: #34383d; }
-.cb-metric { display: grid; gap: 2px; font-size: 12px; color: var(--muted, #666); }
+.cb-metric { display: grid; gap: 2px; font-size: 12px; color: var(--fg, #171717); }
 .cb-metric strong { font-size: 15px; color: var(--fg, #171717); }
 .cb-txt-red { color: #e11 !important; } .cb-txt-green { color: #1f9d55 !important; }
 .cb-gauge { position: relative; height: 22px; border-radius: 6px; background: #ececec; overflow: hidden; margin: 8px 0 6px; }
@@ -1284,6 +1291,13 @@ body.theme-dark .cb-mode select { background: #1b1d20; color: #e6e6e6; border-co
 .cb-cost { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border, #d7d7d7); }
 .cb-section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
 .cb-section-heading > div { display: grid; gap: 3px; }
+.cb-cost .eyebrow,
+.cb-cost .cb-section-heading strong,
+.cb-cost .cb-cost-metric span,
+.cb-cost .cb-cost-metric strong,
+.cb-cost .cb-data-quality,
+.cb-cost .cb-cost-footnote,
+.cb-cost .cb-cost-limitation { color: var(--fg, #171717); }
 .cb-data-quality { white-space: nowrap; padding: 4px 8px; border-radius: 999px; font-size: 10px; font-weight: 800; letter-spacing: .04em; }
 .cb-quality-live { color: #1f7a46; background: #e8f5ee; border: 1px solid #8dccaa; }
 .cb-quality-muted { color: #6d7074; background: #f2f2f2; border: 1px solid #c9c9c9; }
@@ -1297,8 +1311,8 @@ body.theme-dark .cb-mode select { background: #1b1d20; color: #e6e6e6; border-co
 .cb-time-bucket { display: flex; align-items: end; justify-content: center; gap: 1px; flex: 1; height: 100%; min-width: 5px; }
 .cb-time-local, .cb-time-cloud { display: block; width: 45%; min-height: 1px; border-radius: 2px 2px 0 0; }
 .cb-time-local { background: #1f9d55; } .cb-time-cloud { background: #e11; }
-.cb-cost-footnote { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; color: var(--muted, #666); font-size: 11px; }
-.cb-cost-limitation { margin: 8px 0 0; color: var(--muted, #666); font-size: 11px; }
+.cb-cost-footnote { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; color: var(--fg, #171717); font-size: 11px; }
+.cb-cost-limitation { margin: 8px 0 0; color: var(--fg, #171717); font-size: 11px; opacity: .88; }
 .cb-hit-feed { display: grid; gap: 4px; margin-top: 10px; font-size: 11px; }
 .cb-hit-feed span { color: var(--muted, #666); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .cb-interactive-controls { margin-top: 18px; padding: 14px; border: 1px solid var(--border, #d7d7d7); border-radius: 9px; background: var(--card-subtle, #f8f8f8); }
