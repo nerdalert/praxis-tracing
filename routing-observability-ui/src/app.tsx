@@ -729,6 +729,7 @@ function TokenPanel() {
   const [busy, setBusy] = useState(false);
   const [fixtureState, setFixtureState] = useState("recovered");
   const [charges, setCharges] = useState<Record<string, number>>({});
+  const [tokenRequestPage, setTokenRequestPage] = useState(1);
   const refresh = useCallback(async () => {
     try {
       const value = await api.tokenStatus(fixtureState);
@@ -791,6 +792,18 @@ function TokenPanel() {
         ? `HTTP ${r.http.status}`
         : null,
   }));
+  const tokenRequestPageCount = Math.max(1, Math.ceil(renderedRows.length / REQUESTS_PER_PAGE));
+  const visibleTokenRows = useMemo(() => {
+    const page = Math.min(tokenRequestPage, tokenRequestPageCount);
+    const start = (page - 1) * REQUESTS_PER_PAGE;
+    return renderedRows.slice(start, start + REQUESTS_PER_PAGE);
+  }, [renderedRows, tokenRequestPage, tokenRequestPageCount]);
+  useEffect(() => {
+    setTokenRequestPage(1);
+  }, [fixtureState]);
+  useEffect(() => {
+    setTokenRequestPage((page) => Math.min(page, tokenRequestPageCount));
+  }, [tokenRequestPageCount]);
   const providerDistribution = renderedRows.reduce<Record<string, number>>(
     (counts, row) => {
       if (row.admission === "admitted" && row.provider) {
@@ -935,10 +948,10 @@ function TokenPanel() {
                 </tr>
               </thead>
               <tbody id="token-rate-limit-requests">
-                {renderedRows.length ? (
-                  renderedRows.map((r, i) => (
+                {visibleTokenRows.length ? (
+                  visibleTokenRows.map((r, i) => (
                     <tr key={i}>
-                      <td>{i + 1}</td>
+                      <td>{(Math.min(tokenRequestPage, tokenRequestPageCount) - 1) * REQUESTS_PER_PAGE + i + 1}</td>
                       <td className="token-request-identity"><strong>{r.application || r.principal || "—"}</strong><small>{title(r.consumer)}</small></td>
                       <td>{r.admission || "—"}</td>
                       <td>{r.quota?.remaining ?? r.remaining ?? "—"}</td>
@@ -956,6 +969,11 @@ function TokenPanel() {
               </tbody>
             </table>
           </div>
+          <RequestPagination
+            page={Math.min(tokenRequestPage, tokenRequestPageCount)}
+            pageCount={tokenRequestPageCount}
+            onPageChange={(page) => setTokenRequestPage(Math.max(1, Math.min(page, tokenRequestPageCount)))}
+          />
           <SlidingWindowActivity status={status} rows={rows} />
           <div className="quota-distribution" aria-label="Observed provider distribution">
             <div className="quota-distribution-heading">
@@ -994,6 +1012,57 @@ function TokenPanel() {
   );
 }
 
+const REQUESTS_PER_PAGE = 20;
+
+function RequestPagination({
+  page,
+  pageCount,
+  onPageChange,
+}: {
+  page: number;
+  pageCount: number;
+  onPageChange: (page: number) => void;
+}) {
+  if (pageCount <= 1) return null;
+
+  return (
+    <nav className="request-pagination" aria-label="Request history pages">
+      <button
+        type="button"
+        className="secondary-button"
+        onClick={() => onPageChange(page - 1)}
+        disabled={page === 1}
+        aria-label="Previous request history page"
+      >
+        Previous
+      </button>
+      <div className="request-page-numbers">
+        {Array.from({ length: pageCount }, (_, index) => index + 1).map((pageNumber) => (
+          <button
+            type="button"
+            key={pageNumber}
+            className={`request-page-number ${pageNumber === page ? "active" : ""}`}
+            onClick={() => onPageChange(pageNumber)}
+            aria-current={pageNumber === page ? "page" : undefined}
+            aria-label={`Request history page ${pageNumber}`}
+          >
+            {pageNumber}
+          </button>
+        ))}
+      </div>
+      <button
+        type="button"
+        className="secondary-button"
+        onClick={() => onPageChange(page + 1)}
+        disabled={page === pageCount}
+        aria-label="Next request history page"
+      >
+        Next
+      </button>
+    </nav>
+  );
+}
+
 export function App() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -1013,6 +1082,7 @@ export function App() {
   const [replayWindow, setReplayWindow] = useState(100);
   const [requestWindowMinutes, setRequestWindowMinutes] = useState(15);
   const [providerFilter, setProviderFilter] = useState("all");
+  const [requestPage, setRequestPage] = useState(1);
   const [tokenData, setTokenData] = useState<any>(null);
   const tokenRateLimitProfile = capabilities.environment?.profile === "token_rate_limit";
   const activeRequest = selected || requests[0] || null;
@@ -1027,6 +1097,18 @@ export function App() {
     const count = Math.max(1, Math.ceil(inWindow.length * (replayWindow / 100)));
     return inWindow.slice(0, count);
   }, [providerFilter, replayWindow, requestWindowMinutes, requests]);
+  const requestPageCount = Math.max(1, Math.ceil(explorerRequests.length / REQUESTS_PER_PAGE));
+  const visibleExplorerRequests = useMemo(() => {
+    const page = Math.min(requestPage, requestPageCount);
+    const start = (page - 1) * REQUESTS_PER_PAGE;
+    return explorerRequests.slice(start, start + REQUESTS_PER_PAGE);
+  }, [explorerRequests, requestPage, requestPageCount]);
+  useEffect(() => {
+    setRequestPage(1);
+  }, [providerFilter, replayWindow, requestWindowMinutes]);
+  useEffect(() => {
+    setRequestPage((page) => Math.min(page, requestPageCount));
+  }, [requestPageCount]);
   const refresh = useCallback(async () => {
     const results = await Promise.allSettled([
       api.status(),
@@ -1470,9 +1552,14 @@ export function App() {
               <span>providers</span>
             </div>
             <RequestTable
-              requests={explorerRequests}
+              requests={visibleExplorerRequests}
               onSelect={selectRequest}
               selectedRequest={activeRequest}
+            />
+            <RequestPagination
+              page={Math.min(requestPage, requestPageCount)}
+              pageCount={requestPageCount}
+              onPageChange={(page) => setRequestPage(Math.max(1, Math.min(page, requestPageCount)))}
             />
           </section>
           <aside className="side-column">
