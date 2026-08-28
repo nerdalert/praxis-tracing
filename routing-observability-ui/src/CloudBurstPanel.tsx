@@ -18,7 +18,7 @@ type CBStatus = {
   local_admission?: string | null; pressure_active?: boolean; cloud_burst_active?: boolean; burst_active?: boolean; groups?: CBGroup[];
   modes?: Record<string, CBMode>; default_mode?: string;
   overlay_revision?: { value?: string } | null;
-  controls?: { metrics: Record<string, number>; health: Record<string, string>; weights: Record<string, number>; allocation: { enforcement: string; limit: number | null; revision: number | string; verified?: boolean }; last_action?: { type: string; id?: string; at?: string } | null };
+  controls?: { providers?: Array<{ key: string; name: string; simulator: string }>; metrics: Record<string, number>; health: Record<string, string>; disabled?: Record<string, boolean>; weights: Record<string, number>; allocation: { enforcement: string; limit: number | null; revision: number | string; verified?: boolean }; last_action?: { type: string; id?: string; at?: string } | null };
 };
 type CBCost = {
   enabled: boolean; source?: string; telemetry_quality?: string;
@@ -121,6 +121,7 @@ export default function CloudBurstPanel() {
   const runScenario = (id: string) => control("scenario", { id });
   const publishWeights = () => control("weights", weights);
   const setHealth = (provider: string, state: string) => control("health", { provider, state });
+  const setProviderDisabled = (provider: string, disabled: boolean) => control("provider", { provider, disabled });
   const setAllocation = (enforcement: string, limit = allocationLimit) => control("allocation", { principal: "loadgen", enforcement, limit });
 
   const tour = [
@@ -147,7 +148,9 @@ export default function CloudBurstPanel() {
   const pressureActive = Boolean(s.pressure_active ?? s.local_admission === "existing_only");
   const burst = Boolean(s.cloud_burst_active ?? s.burst_active);
   const pressureRunning = Boolean(s.load_on || pressureActive);
-  const localKeys = Object.keys(s.controls?.weights || {}).filter((key) => (s.groups || []).some((candidate) => !candidate.external && String(candidate.cluster || "").toLowerCase().endsWith(`-${key}`)));
+  const localProviders = (s.controls?.providers || []).filter((provider) => (s.groups || []).some((candidate) => !candidate.external && candidate.cluster === provider.name));
+  const localKeys = localProviders.map((provider) => provider.key);
+  const disabledProviderNames = new Set(localProviders.filter((provider) => s.controls?.disabled?.[provider.key]).map((provider) => provider.name));
   const isGpu = activeMode === "gpu";
   const gatewayDisplayName = (value: string) => {
     const normalized = String(value || "provider").replace(/^(qwen|openai)-/i, "").replace(/-(local|cloud)$/i, "");
@@ -231,11 +234,11 @@ export default function CloudBurstPanel() {
       <section className="cb-interactive-controls" aria-label="Interactive cloud burst controls">
         <div className="cb-section-heading"><div><span className="eyebrow">Interactive operator controls</span><strong>{isGpu ? "Create sustained pressure and observe the accepted overlay" : "Set queue metrics and observe the accepted overlay"}</strong></div>{!isGpu && <button className="secondary-button" disabled={busy} onClick={resetMetrics}>Reset metrics</button>}</div>
         {isGpu ? <p className="cb-control-note">Real GPU mode uses sustained requests and observed vLLM queue metrics. Static metric sliders are disabled for this backend.</p> : <div className="cb-provider-controls">
-          {(["a", "b", "c"] as const).map((provider) => {
+          {localProviders.map(({ key: provider, name }) => {
             const value = s.controls?.metrics?.[provider] ?? 0;
             const health = s.controls?.health?.[provider] || "healthy";
             return <label className="cb-provider-slider" key={provider}>
-              <span><strong>Provider {provider.toUpperCase()}</strong><output>{value} waiting</output></span>
+              <span><strong>{name}</strong><output>{value} waiting</output></span>
               <input aria-label={`Provider ${provider.toUpperCase()} queue metric`} type="range" min="0" max="20" value={value} disabled={busy} onChange={(event) => setMetric(provider, Number(event.target.value))} />
               <small>{health} · enter above 8.5 / 10</small>
               <button className="secondary-button" disabled={busy} onClick={() => setHealth(provider, health === "healthy" ? "unhealthy" : "healthy")}>{health === "healthy" ? "Mark unhealthy" : "Restore healthy"}</button>
@@ -268,6 +271,24 @@ export default function CloudBurstPanel() {
         </div>
       </section>
 
+      <section className="cb-provider-disable" aria-label="Simulator failover controls">
+        <div className="cb-section-heading">
+          <div><span className="eyebrow">Provider failover</span><strong>Disable a local vLLM simulator</strong></div>
+          <span className="cb-control-note">Uses the simulator Deployment and normal Grid health reconciliation.</span>
+        </div>
+        <p className="cb-control-note">Disable removes the selected simulator’s endpoints so Grid withdraws it from new traffic. Enable restores one replica. This is a real failover test; it does not edit the accepted overlay.</p>
+        <div className="cb-disable-grid">
+          {localProviders.map(({ key, name, simulator }) => {
+            const disabled = Boolean(s.controls?.disabled?.[key]);
+            const health = s.controls?.health?.[key] || "healthy";
+            return <div className={`cb-disable-card ${disabled || health === "unhealthy" ? "cb-disable-card-off" : ""}`} key={key}>
+              <div><strong>{name}</strong><small>{simulator} · {disabled ? "disabled" : health}</small></div>
+              <button className="secondary-button" disabled={busy} onClick={() => setProviderDisabled(key, !disabled)}>{disabled ? "Enable vLLM" : "Disable vLLM"}</button>
+            </div>;
+          })}
+        </div>
+      </section>
+
       {/* topology: client -> consumers -> N provider gateways -> per-gateway vLLM + OpenAI backends.
           One backend row per candidate (no overlap); colored by real group: same-site local = active,
           Active routes are green; unavailable or non-admitting routes are red. */}
@@ -295,27 +316,31 @@ export default function CloudBurstPanel() {
             <Node x={210} y={aY} w={120} label="Consumer East" sub="quota + route" />
             <Node x={210} y={bY} w={120} label="Consumer West" sub="quota + route" />
             {laid.map(({ gateway, children, gwY }) => {
-              const gatewayActive = gateway.candidates.some((c) => c.admission === "new_and_existing" && c.fresh !== false);
-              const eligible = gateway.candidates.some((c) => c.admission === "new_and_existing");
-              const gwTone = gatewayActive ? "active" : "unavailable";
+              const gatewayActive = gateway.candidates.some((c) => !disabledProviderNames.has(c.cluster) && c.admission === "new_and_existing" && c.fresh !== false);
+              const gatewayPressure = !gatewayActive && gateway.candidates.some((c) => !disabledProviderNames.has(c.cluster) && c.admission === "existing_only");
+              const eligible = gateway.candidates.some((c) => !disabledProviderNames.has(c.cluster) && c.admission === "new_and_existing");
+              const gwTone = gatewayActive ? "active" : gatewayPressure ? "pressure" : "unavailable";
+              const gwColor = gatewayActive ? GREEN : gatewayPressure ? AMBER : RED;
               return (
                 <React.Fragment key={gateway.id}>
-                  <Edge x1={330} y1={aY + 28} x2={480} y2={gwY + 28} color={gatewayActive ? GREEN : RED} />
-                  <Edge x1={330} y1={bY + 28} x2={480} y2={gwY + 28} color={gatewayActive ? GREEN : RED} />
+                  <Edge x1={330} y1={aY + 28} x2={480} y2={gwY + 28} color={gwColor} />
+                  <Edge x1={330} y1={bY + 28} x2={480} y2={gwY + 28} color={gwColor} />
                   <Node x={480} y={gwY} w={190} label={`${gatewayDisplayName(gateway.site)} provider gateway`}
                     sub={`${gateway.candidates.map((c) => `g${c.group}`).join(" / ")} · ${gatewayActive ? (eligible ? "accepting new" : "active") : "not accepting connections"}`}
                     tone={gwTone} />
                   {children.map(({ candidate, y }) => {
-                    const candidateActive = candidate.admission === "new_and_existing" && candidate.fresh !== false;
-                    const edgeColor = candidateActive ? GREEN : RED;
-                    const nodeTone = candidateActive ? "active" : "unavailable";
+                    const candidateDisabled = !candidate.external && disabledProviderNames.has(candidate.cluster);
+                    const candidateActive = !candidateDisabled && candidate.admission === "new_and_existing" && candidate.fresh !== false;
+                    const candidatePressure = !candidateDisabled && candidate.admission === "existing_only";
+                    const edgeColor = candidateDisabled ? RED : candidateActive ? GREEN : candidatePressure ? AMBER : RED;
+                    const nodeTone = candidateDisabled || (!candidateActive && !candidatePressure) ? "unavailable" : candidatePressure ? "pressure" : "active";
                     const detail = candidate.external ? "overflow" : (candidate.tier === "same_site" ? "local" : String(candidate.tier || "").replace(/_/g, " "));
                     return (
                       <React.Fragment key={`${gateway.id}-${candidate.cluster}`}>
-                        <Edge x1={670} y1={gwY + 28} x2={800} y2={y + 28} color={edgeColor} />
+                        <Edge x1={670} y1={gwY + 28} x2={800} y2={y + 28} color={edgeColor} dashed={candidateDisabled} />
                         <Node x={800} y={y} w={280}
                           label={candidate.external ? `${candidate.provider === "bedrock" ? "Bedrock" : "OpenAI"} route` : "vLLM backend"}
-                          sub={`${candidate.cluster} · g${candidate.group} · ${candidateActive ? "accepting new" : "not accepting connections"} · ${detail}`}
+                          sub={`${candidate.cluster} · g${candidate.group} · ${candidateDisabled ? "endpoint unavailable" : candidateActive ? "accepting new" : candidatePressure ? "pressure · existing only" : "not accepting connections"} · ${detail}`}
                           tone={nodeTone} />
                       </React.Fragment>
                     );
@@ -386,12 +411,12 @@ function Node({ x, y, w, label, sub, tone = "muted" }:
   );
 }
 
-function Edge({ x1, y1, x2, y2, color, label }:
-  { x1: number; y1: number; x2: number; y2: number; color: string; label?: string }) {
+function Edge({ x1, y1, x2, y2, color, label, dashed }:
+  { x1: number; y1: number; x2: number; y2: number; color: string; label?: string; dashed?: boolean }) {
   const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
   return (
     <g>
-      <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} strokeWidth={2.5} />
+      <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} strokeWidth={2.5} strokeDasharray={dashed ? "7 5" : undefined} opacity={dashed ? 0.85 : 1} />
       {label && <text x={mx} y={my - 6} textAnchor="middle" className="cb-edge-label" fill={color}>{label}</text>}
     </g>
   );

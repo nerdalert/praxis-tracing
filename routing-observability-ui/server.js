@@ -2857,6 +2857,7 @@ const CB_NETWORK = process.env.TRACING_UI_CB_NETWORK || 'grid-token-rate-limit';
 const CB_LOCAL_PROVIDER_NAMES = (process.env.TRACING_UI_CB_LOCAL_PROVIDERS || 'static-a,static-b,static-c').split(',').map(value => value.trim()).filter(Boolean);
 const CB_SIM_PROVIDER_NAMES = (process.env.TRACING_UI_CB_SIM_PROVIDERS || 'static-sim-a,static-sim-b,static-sim-c').split(',').map(value => value.trim()).filter(Boolean);
 const CB_LOCAL_PROVIDER_KEYS = CB_LOCAL_PROVIDER_NAMES.map((_, index) => String.fromCharCode(97 + index));
+const CB_LOCAL_PROVIDER_INDEX = new Map(CB_LOCAL_PROVIDER_NAMES.map((name, index) => [name, index]));
 const CB_CONSUMER_DEPLOYS = {
   a: process.env.TRACING_UI_CB_CONSUMER_A_DEPLOY || 'consumer-gateway-a',
   b: process.env.TRACING_UI_CB_CONSUMER_B_DEPLOY || 'consumer-gateway-b',
@@ -2902,9 +2903,10 @@ const cloudBurstTrafficHistory = [];
 let cloudBurstTrafficSequence = 0;
 let cloudBurstPressureJob = null;
 const cloudBurstControlState = {
-  metrics: { a: 0, b: 0, c: 0 },
-  health: { a: 'healthy', b: 'healthy', c: 'healthy' },
-  weights: { a: 50, b: 30, c: 20 },
+  metrics: Object.fromEntries(CB_LOCAL_PROVIDER_KEYS.map(key => [key, 0])),
+  health: Object.fromEntries(CB_LOCAL_PROVIDER_KEYS.map(key => [key, 'healthy'])),
+  disabled: Object.fromEntries(CB_LOCAL_PROVIDER_KEYS.map(key => [key, false])),
+  weights: Object.fromEntries(CB_LOCAL_PROVIDER_KEYS.map((key, index) => [key, [50, 30, 20][index] || 1])),
   overflow_weights: { openai: 25, bedrock: 75 },
   overflow_health: { openai: 'healthy', bedrock: 'healthy' },
   allocation: { principal: CB_TRAFFIC_PRINCIPAL, limit: null, enforcement: 'soft', revision: 0 },
@@ -3109,8 +3111,10 @@ function cbRequireControl(res) {
 }
 
 function cbProvider(value) {
-  const provider = String(value);
-  return CB_LOCAL_PROVIDER_KEYS.includes(provider) ? provider : null;
+  const provider = String(value || '');
+  if (CB_LOCAL_PROVIDER_KEYS.includes(provider)) return provider;
+  const index = CB_LOCAL_PROVIDER_INDEX.get(provider);
+  return index === undefined ? null : CB_LOCAL_PROVIDER_KEYS[index];
 }
 
 function cbLocalProviderName(provider) {
@@ -3142,6 +3146,18 @@ async function cbRunMetric(provider, queue) {
   await cbKubectl(['rollout', 'restart', `deploy/${providerName}`], CB_CONTROL_TIMEOUT);
   await new Promise(resolve => setTimeout(resolve, 20000));
   cloudBurstControlState.metrics[provider] = queue;
+}
+
+async function cbSetProviderDisabled(provider, disabled) {
+  const providerName = cbSimProviderName(provider);
+  if (!providerName) throw new Error(`unknown configured simulator: ${provider}`);
+  // Remove/restore Service endpoints through the simulator Deployment. Grid's
+  // normal health evaluation withdraws or restores the candidate; the UI does
+  // not forge an overlay or alter request-time routing.
+  await cbKubectl(['scale', `deploy/${providerName}`, `--replicas=${disabled ? 0 : 1}`], CB_CONTROL_TIMEOUT);
+  cloudBurstControlState.disabled[provider] = disabled;
+  cloudBurstControlState.health[provider] = disabled ? 'disabled' : 'healthy';
+  await cbReconcile();
 }
 
 async function cbRunMetrics(values) {
@@ -3186,7 +3202,7 @@ async function cbResetMetrics() {
     await cbKubectl(['rollout', 'restart', `deploy/${providerName}`], CB_CONTROL_TIMEOUT);
   }
   await new Promise(resolve => setTimeout(resolve, 20000));
-  cloudBurstControlState.metrics = { a: 0, b: 0, c: 0 };
+  cloudBurstControlState.metrics = Object.fromEntries(CB_LOCAL_PROVIDER_KEYS.map(key => [key, 0]));
 }
 
 async function cbStopAllPressure() {
@@ -3462,6 +3478,18 @@ app.post('/api/v1/cloud-burst/health', async (req, res) => {
   } catch (error) { res.status(503).json({ error: error.message }); }
 });
 
+app.post('/api/v1/cloud-burst/provider', async (req, res) => {
+  if (!cbRequireControl(res)) return;
+  const provider = cbProvider(req.body?.provider);
+  if (!provider) return res.status(400).json({ error: 'provider must be a configured local simulator' });
+  if (typeof req.body?.disabled !== 'boolean') return res.status(400).json({ error: 'disabled must be boolean' });
+  try {
+    await cbSetProviderDisabled(provider, req.body.disabled);
+    cloudBurstControlState.last_action = { type: req.body.disabled ? 'provider_disabled' : 'provider_enabled', id: provider, at: new Date().toISOString() };
+    res.json({ ok: true, provider, disabled: req.body.disabled, controls: cloudBurstControlState });
+  } catch (error) { res.status(503).json({ error: error.message, controls: cloudBurstControlState }); }
+});
+
 app.post('/api/v1/cloud-burst/allocation', async (req, res) => {
   if (!cbRequireControl(res)) return;
   const principal = typeof req.body?.principal === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(req.body.principal) ? req.body.principal : CB_TRAFFIC_PRINCIPAL;
@@ -3610,8 +3638,10 @@ app.get('/api/v1/cloud-burst', async (_req, res) => {
         && cloudBurstTrafficHistory.some(item => item.cloud && Date.parse(item.at) >= Date.now() - 60_000),
       overlay_revision: overlayRevision, groups,
       controls: {
+        providers: CB_LOCAL_PROVIDER_KEYS.map((key, index) => ({ key, name: CB_LOCAL_PROVIDER_NAMES[index], simulator: CB_SIM_PROVIDER_NAMES[index] })),
         metrics: cloudBurstControlState.metrics,
         health: cloudBurstControlState.health,
+        disabled: cloudBurstControlState.disabled,
         weights: cloudBurstControlState.weights,
         overflow_weights: cloudBurstControlState.overflow_weights,
         overflow_health: cloudBurstControlState.overflow_health,
