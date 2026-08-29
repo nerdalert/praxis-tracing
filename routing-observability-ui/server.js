@@ -230,7 +230,7 @@ const TOKEN_RATE_LIMIT_CONTRACT = {
   version: 'token-rate-limit.v1',
   request: ['principal', 'model', 'consumer_gateway', 'admission', 'quota', 'route', 'http', 'trace'],
   quota: ['backend', 'limit', 'used', 'remaining', 'reset_at', 'retry_after_seconds'],
-  route: ['provider_gateway', 'overlay_revision', 'hops'],
+  route: ['provider_gateway', 'inference_provider', 'overlay_revision', 'hops'],
   trace: ['trace_id', 'jaeger_url', 'spans'],
 };
 
@@ -308,6 +308,9 @@ async function createTokenRateLimitRecord(consumer, appConfig = null, options = 
     || response.headers['x-grid-combined-provider-gateway']
     || response.headers['x-grid-llmd-provider-gateway']
     || null;
+  const inferenceProvider = response.headers['x-ai-inference-provider']
+    || response.headers['x-ai-demo-inference-provider']
+    || null;
   const limit = parseOptionalInteger(rateLimitHeader(response.headers, 'x-ratelimit-limit'));
   const remaining = parseOptionalInteger(rateLimitHeader(response.headers, 'x-ratelimit-remaining'));
   const resetSeconds = parseOptionalInteger(rateLimitHeader(response.headers, 'x-ratelimit-reset'));
@@ -351,17 +354,19 @@ async function createTokenRateLimitRecord(consumer, appConfig = null, options = 
     },
     requested_tokens: requestedTokens,
     response_model: responseModel,
+    inference_provider: inferenceProvider,
     external_provider: externalProvider,
     input_tokens: inputTokens,
     output_tokens: outputTokens,
     session_id: options.session_id || null,
     route: {
       provider_gateway: provider,
+      inference_provider: inferenceProvider,
       overlay_revision: response.headers['x-grid-overlay-revision'] || null,
       hops: admitted && provider
         ? externalProvider
-          ? ['client', TOKEN_RATE_LIMIT_CONSUMER_LABELS[consumer] || `Consumer Gateway ${consumer.toUpperCase()}`, 'quota-admitted', gatewayLabel, 'OpenAI route', 'api.openai.com']
-          : ['client', TOKEN_RATE_LIMIT_CONSUMER_LABELS[consumer] || `Consumer Gateway ${consumer.toUpperCase()}`, 'quota-admitted', provider, TOKEN_RATE_LIMIT_BACKEND_LABEL]
+          ? ['client', TOKEN_RATE_LIMIT_CONSUMER_LABELS[consumer] || `Consumer Gateway ${consumer.toUpperCase()}`, 'quota-admitted', gatewayLabel, inferenceProvider || 'OpenAI route', 'api.openai.com']
+          : ['client', TOKEN_RATE_LIMIT_CONSUMER_LABELS[consumer] || `Consumer Gateway ${consumer.toUpperCase()}`, 'quota-admitted', provider, inferenceProvider || TOKEN_RATE_LIMIT_BACKEND_LABEL]
         : ['client', TOKEN_RATE_LIMIT_CONSUMER_LABELS[consumer] || `Consumer Gateway ${consumer.toUpperCase()}`, unavailable ? 'quota-unavailable' : quotaDenied ? 'quota-denied' : 'provider-error'],
     },
     http: { status, method: 'POST', path: '/v1/chat/completions' },
@@ -885,10 +890,10 @@ async function runVcrSustainedLoadJob(job, ip) {
 // Jaeger proxy helpers
 // ---------------------------------------------------------------------------
 
-function jaegerFetch(path) {
+function jaegerFetch(path, timeoutMs = 3000) {
   return new Promise((resolve, reject) => {
     const url = `${JAEGER_URL}${path}`;
-    const req = http.get(url, { timeout: 3000 }, (res) => {
+    const req = http.get(url, { timeout: timeoutMs }, (res) => {
       let data = '';
       res.on('data', chunk => { data += chunk; });
       res.on('end', () => {
@@ -900,7 +905,7 @@ function jaegerFetch(path) {
       });
     });
     req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    req.on('timeout', () => { req.destroy(new Error(`timeout after ${timeoutMs}ms`)); });
   });
 }
 
@@ -914,26 +919,30 @@ async function isJaegerReachable() {
 }
 
 const JAEGER_SERVICES = [
-  'grid-tracing-poc', 'consumer-gateway', 'praxis-ai',
+  'grid-tracing-poc', 'consumer-gateway', 'praxis',
   'praxis-gtm-emulator', 'praxis-east-edge', 'praxis-west-edge',
   'praxis-east-provider', 'praxis-west-provider',
 ];
 
 async function fetchLiveTraces(service, limit) {
   try {
-    const result = await jaegerFetch(`/api/traces?service=${service}&limit=${limit}`);
+    // Praxis traces contain many filter spans. Keep each service query bounded
+    // so a large Jaeger response cannot make the UI appear empty on timeout.
+    const result = await jaegerFetch(`/api/traces?service=${encodeURIComponent(service)}&limit=${limit}`, 10000);
     if (result.status !== 200 || !result.body.data) return [];
     return result.body.data.map(parseJaegerTrace).filter(Boolean);
-  } catch {
+  } catch (error) {
+    console.warn(`[tracing] Jaeger query failed for service=${service}: ${error.message}`);
     return [];
   }
 }
 
 async function fetchLiveTracesAllServices(limit) {
+  const perServiceLimit = Math.min(Math.max(limit, 20), 50);
   const allTraces = [];
   const seen = new Set();
-  for (const svc of JAEGER_SERVICES) {
-    const traces = await fetchLiveTraces(svc, limit);
+  const serviceResults = await Promise.all(JAEGER_SERVICES.map(svc => fetchLiveTraces(svc, perServiceLimit)));
+  for (const traces of serviceResults) {
     for (const t of traces) {
       if (!seen.has(t.trace_id)) {
         seen.add(t.trace_id);
