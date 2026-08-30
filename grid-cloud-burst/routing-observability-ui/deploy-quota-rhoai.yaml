@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: praxis-tracing-quota-ui
+  namespace: praxis-tracing-rhoai
+  labels:
+    app.kubernetes.io/name: praxis-tracing-quota-ui
+    app.kubernetes.io/part-of: praxis-tracing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: praxis-tracing-quota-ui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: praxis-tracing-quota-ui
+    spec:
+      containers:
+        - name: ui
+          image: default-route-openshift-image-registry.apps.cluster-4l6x6.4l6x6.sandbox1213.opentlc.com/praxis-tracing-rhoai/praxis-tracing-quota-ui:plain-token-explanation-20260819
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: TRACING_UI_PROFILE
+              value: token-rate-limit
+            - name: TRACING_UI_LOGIN_PAGE
+              value: "true"
+            - name: TRACING_UI_TOKEN_RATE_LIMIT
+              value: "true"
+            - name: TRACING_UI_TOKEN_CONSUMER_A_URL
+              value: http://consumer-gateway-a.grid-token-rate-limit-rhoai.svc.cluster.local:8080
+            - name: TRACING_UI_TOKEN_CONSUMER_B_URL
+              value: http://consumer-gateway-b.grid-token-rate-limit-rhoai.svc.cluster.local:8080
+            - name: TRACING_UI_TOKEN_USERNAME
+              value: alice
+            - name: TRACING_UI_TOKEN_MODEL
+              value: Qwen/Qwen3-0.6B
+            - name: TRACING_UI_TOKEN_LIMIT
+              value: "100"
+            - name: TRACING_UI_TOKEN_WINDOW_SECONDS
+              value: "60"
+            - name: TRACING_UI_TOKEN_PASSWORD_FILE
+              value: /var/run/secrets/token-rate-limit/password
+            - name: TRACING_UI_AUTH_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: tracing-ui-auth
+                  key: username
+            - name: TRACING_UI_AUTH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tracing-ui-auth
+                  key: password
+            - name: JAEGER_URL
+              value: http://jaeger-query.praxis-tracing-rhoai.svc.cluster.local:16686
+            - name: JAEGER_UI_URL
+              value: /jaeger
+          volumeMounts:
+            - name: token-rate-limit-credentials
+              mountPath: /var/run/secrets/token-rate-limit
+              readOnly: true
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: token-rate-limit-credentials
+          secret:
+            secretName: token-rate-limit-demo-credentials
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: praxis-tracing-quota-ui
+  namespace: praxis-tracing-rhoai
+  labels:
+    app.kubernetes.io/name: praxis-tracing-quota-ui
+spec:
+  selector:
+    app.kubernetes.io/name: praxis-tracing-quota-ui
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: praxis-tracing-quota-ui
+  namespace: praxis-tracing-rhoai
+spec:
+  to:
+    kind: Service
+    name: praxis-tracing-quota-ui
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

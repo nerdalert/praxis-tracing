@@ -46,7 +46,6 @@ export default function CloudBurstPanel() {
   const [allocationLimit, setAllocationLimit] = useState(10000);
   const [tourIndex, setTourIndex] = useState(0);
   const timer = useRef<number | null>(null);
-  const candidateCache = useRef(new Map<string, CBGroup>());
 
   const poll = useCallback(async () => {
     try {
@@ -149,20 +148,9 @@ export default function CloudBurstPanel() {
   const pressureActive = Boolean(s.pressure_active ?? s.local_admission === "existing_only");
   const burst = Boolean(s.cloud_burst_active ?? s.burst_active);
   const pressureRunning = Boolean(s.load_on || pressureActive);
-  // Keep the control cards driven by the configured provider set, not only by
-  // currently eligible overlay candidates. A disabled backend is correctly
-  // withdrawn from the overlay, but its card must remain available so it can
-  // be restored without a page reload or a hardcoded provider list.
-  const localProviders = s.controls?.providers || [];
+  const localProviders = (s.controls?.providers || []).filter((provider) => (s.groups || []).some((candidate) => !candidate.external && candidate.cluster === provider.name));
   const localKeys = localProviders.map((provider) => provider.key);
   const disabledProviderNames = new Set(localProviders.filter((provider) => s.controls?.disabled?.[provider.key]).map((provider) => provider.name));
-  for (const candidate of s.groups || []) candidateCache.current.set(candidate.cluster, candidate);
-  const topologyCandidates = [...(s.groups || [])];
-  for (const provider of localProviders) {
-    if (!disabledProviderNames.has(provider.name) || topologyCandidates.some((candidate) => candidate.cluster === provider.name)) continue;
-    const cached = candidateCache.current.get(provider.name);
-    if (cached) topologyCandidates.push(cached);
-  }
   const isGpu = activeMode === "gpu";
   const gatewayDisplayName = (value: string) => {
     const normalized = String(value || "provider").replace(/^(qwen|openai)-/i, "").replace(/-(local|cloud)$/i, "");
@@ -172,7 +160,7 @@ export default function CloudBurstPanel() {
       .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
       .join(" ");
   };
-  const gateways = Object.values(topologyCandidates.reduce<Record<string, { id: string; site: string; candidates: CBGroup[] }>>((all, candidate) => {
+  const gateways = Object.values((s.groups || []).reduce<Record<string, { id: string; site: string; candidates: CBGroup[] }>>((all, candidate) => {
     // The overlay has one candidate per backend route. For the symmetric
     // topology, openai-west/openai-central/openai-east share the physical
     // west/central/east provider gateway with their local vLLM candidates.

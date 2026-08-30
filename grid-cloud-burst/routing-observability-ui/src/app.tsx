@@ -116,7 +116,6 @@ function displayHopLabel(label: string, tokenProfile = false): string {
     const match = label.toLowerCase().match(/^(?:vcr-)?(east|central|west)(?:-provider)?$/);
     if (match) return `vLLM ${match[1]} provider`;
   }
-  if (/^llm-d-[a-z0-9-]+$/i.test(label)) return label;
   return label === "vllm-vcr" ? "vLLM" : String(label).replaceAll("-", " ");
 }
 
@@ -644,17 +643,6 @@ function RequestDetail({
   request: RequestItem | null;
   onClose: () => void;
 }) {
-  const [traceData, setTraceData] = useState<any>(null);
-  const [traceLoading, setTraceLoading] = useState(false);
-  const [traceError, setTraceError] = useState<string | null>(null);
-  const requestId = request?.request_id || request?.trace_id || request?.id || null;
-
-  useEffect(() => {
-    setTraceData(null);
-    setTraceError(null);
-    setTraceLoading(false);
-  }, [requestId]);
-
   if (!request)
     return (
       <section
@@ -668,22 +656,6 @@ function RequestDetail({
     "intelligent_route",
     providerText(request),
   ];
-  const traceId = request.trace_id || request.trace?.trace_id || null;
-  const inspectTrace = async () => {
-    if (!requestId) return;
-    setTraceLoading(true);
-    setTraceError(null);
-    try {
-      const response = await fetch(`/api/v1/requests/${encodeURIComponent(requestId)}/trace`);
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.error || `trace inspection returned ${response.status}`);
-      setTraceData(body);
-    } catch (error) {
-      setTraceError(error instanceof Error ? error.message : "trace inspection unavailable");
-    } finally {
-      setTraceLoading(false);
-    }
-  };
   return (
     <section
       id="request-detail"
@@ -732,30 +704,11 @@ function RequestDetail({
             </strong>
           </div>
         </div>
-        {traceId && (
+        {(request.trace_id || request.trace?.trace_id) && (
           <div className="trace-inspection-actions">
-            <button className="secondary-button" onClick={inspectTrace} disabled={traceLoading}>
-              <ExternalLink size={14} /> {traceLoading ? "Loading routing spans…" : "Inspect routing spans"}
+            <button className="secondary-button" onClick={() => window.open(request.jaeger_url || request.trace?.jaeger_url || `http://localhost:16686/trace/${request.trace_id || request.trace?.trace_id}`, "praxis-jaeger", "width=1280,height=900") }>
+              <ExternalLink size={14} /> Open routing span in Jaeger
             </button>
-            <small className="trace-inspection-note">Jaeger stays private; spans are read through the UI server.</small>
-          </div>
-        )}
-        {traceError && <div className="trace-inspection-error">{traceError}</div>}
-        {traceData?.trace && (
-          <div className="trace-inspection-popup" role="dialog" aria-label="Jaeger trace inspection">
-            <div className="trace-inspection-popup-heading">
-              <div><strong>Jaeger trace inspection</strong><small>{traceData.quality || "observed"} · {traceData.trace.span_count || traceData.trace.spans?.length || 0} spans</small></div>
-              <button className="icon-button" aria-label="Close trace inspection" onClick={() => setTraceData(null)}><X size={15} /></button>
-            </div>
-            <div className="trace-span-list">
-              {(traceData.trace.spans || []).map((span: any, index: number) => (
-                <details className="trace-span" key={`${span.span_id || span.operation || "span"}-${index}`} open={index === 0}>
-                  <summary><strong>{span.operation || "span"}</strong><span>{span.service_name || "unknown service"} · {span.kind || "INTERNAL"}</span></summary>
-                  <div className="trace-span-meta"><span>span {span.span_id || "—"}</span><span>duration {span.duration_us ?? "—"} μs</span></div>
-                  {span.tags && Object.keys(span.tags).length > 0 && <dl>{Object.entries(span.tags).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{String(value)}</dd></div>)}</dl>}
-                </details>
-              ))}
-            </div>
           </div>
         )}
         <div className="callout">
@@ -832,7 +785,7 @@ function TokenPanel() {
   const renderedRows = rows.map((r) => ({
     ...r,
     consumer: r.consumer || r.consumer_gateway,
-    provider: r.inference_provider || r.route?.inference_provider || r.provider || r.route?.provider_gateway,
+    provider: r.provider || r.route?.provider_gateway,
     status: r.status
       ? `HTTP ${r.status}`
       : r.http?.status
@@ -1498,7 +1451,7 @@ export function App() {
                   <p>Only {app.name} traffic is shown here. Eligible providers remain visible; the selected route uses {app.name} color.</p>
                   <p className="active-route-summary">
                     {appActiveRequest
-                      ? `Active request ${appActiveRequest.request_id || appActiveRequest.id || "—"}: ${appActiveRequest.consumer_gateway || appActiveRequest.consumer || "consumer"} → ${providerText(appActiveRequest)}`
+                      ? `Active request ${appActiveRequest.request_id || appActiveRequest.id || "—"}: ${appActiveRequest.consumer_gateway || appActiveRequest.consumer || "consumer"} → ${appActiveRequest.route?.provider_gateway || appActiveRequest.provider || "no provider"}`
                       : `No live ${app.name} request observed yet.`}
                   </p>
                 </div>
@@ -1518,7 +1471,7 @@ export function App() {
                 <span className="eyebrow">Live topology</span>
                 <h2>Control-plane context and request path</h2>
                 <p>Active provider routes are red; eligible alternatives remain visible in gray.</p>
-                <p className="active-route-summary">{activeRequest ? `Active request ${activeRequest.request_id || activeRequest.id || "—"}: ${activeRequest.consumer_gateway || activeRequest.consumer || "consumer"} → ${providerText(activeRequest)}` : "Select a request row to show its active path."}</p>
+                <p className="active-route-summary">{activeRequest ? `Active request ${activeRequest.request_id || activeRequest.id || "—"}: ${activeRequest.consumer_gateway || activeRequest.consumer || "consumer"} → ${activeRequest.route?.provider_gateway || activeRequest.provider || "no provider"}` : "Select a request row to show its active path."}</p>
               </div>
               <Badge tone="info">{providers.length || 0} observed providers</Badge>
             </div>

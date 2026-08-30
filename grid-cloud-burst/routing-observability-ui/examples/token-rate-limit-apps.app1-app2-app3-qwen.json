@@ -1,0 +1,35 @@
+[
+  {
+    "id": "app1",
+    "name": "App 1",
+    "username": "app1",
+    "passwordFile": "/run/secrets/token-rate-limit/app1-password",
+    "model": "Qwen/Qwen2.5-3B-Instruct",
+    "color": "#2f80ed",
+    "limit": 60,
+    "windowSeconds": 60,
+    "estimateTokens": 20
+  },
+  {
+    "id": "app2",
+    "name": "App 2",
+    "username": "app2",
+    "passwordFile": "/run/secrets/token-rate-limit/app2-password",
+    "model": "Qwen/Qwen2.5-3B-Instruct",
+    "color": "#d98200",
+    "limit": 60,
+    "windowSeconds": 60,
+    "estimateTokens": 20
+  },
+  {
+    "id": "app3",
+    "name": "App 3",
+    "username": "app3",
+    "passwordFile": "/run/secrets/token-rate-limit/app3-password",
+    "model": "Qwen/Qwen2.5-3B-Instruct",
+    "color": "#3e8635",
+    "limit": 60,
+    "windowSeconds": 60,
+    "estimateTokens": 20
+  }
+]

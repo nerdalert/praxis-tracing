@@ -22,8 +22,7 @@ export type RequestItem = {
   status?: number;
   http?: { status?: number };
   provider?: string;
-  inference_provider?: string | null;
-  route?: { provider_gateway?: string; inference_provider?: string | null; hops?: string[] };
+  route?: { provider_gateway?: string; hops?: string[] };
   trace_id?: string | null;
   trace?: { trace_id?: string | null };
   experience?: string;

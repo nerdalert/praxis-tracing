@@ -230,7 +230,7 @@ const TOKEN_RATE_LIMIT_CONTRACT = {
   version: 'token-rate-limit.v1',
   request: ['principal', 'model', 'consumer_gateway', 'admission', 'quota', 'route', 'http', 'trace'],
   quota: ['backend', 'limit', 'used', 'remaining', 'reset_at', 'retry_after_seconds'],
-  route: ['provider_gateway', 'inference_provider', 'overlay_revision', 'hops'],
+  route: ['provider_gateway', 'overlay_revision', 'hops'],
   trace: ['trace_id', 'jaeger_url', 'spans'],
 };
 
@@ -308,9 +308,6 @@ async function createTokenRateLimitRecord(consumer, appConfig = null, options = 
     || response.headers['x-grid-combined-provider-gateway']
     || response.headers['x-grid-llmd-provider-gateway']
     || null;
-  const inferenceProvider = response.headers['x-ai-inference-provider']
-    || response.headers['x-ai-demo-inference-provider']
-    || null;
   const limit = parseOptionalInteger(rateLimitHeader(response.headers, 'x-ratelimit-limit'));
   const remaining = parseOptionalInteger(rateLimitHeader(response.headers, 'x-ratelimit-remaining'));
   const resetSeconds = parseOptionalInteger(rateLimitHeader(response.headers, 'x-ratelimit-reset'));
@@ -354,19 +351,17 @@ async function createTokenRateLimitRecord(consumer, appConfig = null, options = 
     },
     requested_tokens: requestedTokens,
     response_model: responseModel,
-    inference_provider: inferenceProvider,
     external_provider: externalProvider,
     input_tokens: inputTokens,
     output_tokens: outputTokens,
     session_id: options.session_id || null,
     route: {
       provider_gateway: provider,
-      inference_provider: inferenceProvider,
       overlay_revision: response.headers['x-grid-overlay-revision'] || null,
       hops: admitted && provider
         ? externalProvider
-          ? ['client', TOKEN_RATE_LIMIT_CONSUMER_LABELS[consumer] || `Consumer Gateway ${consumer.toUpperCase()}`, 'quota-admitted', gatewayLabel, inferenceProvider || 'OpenAI route', 'api.openai.com']
-          : ['client', TOKEN_RATE_LIMIT_CONSUMER_LABELS[consumer] || `Consumer Gateway ${consumer.toUpperCase()}`, 'quota-admitted', provider, inferenceProvider || TOKEN_RATE_LIMIT_BACKEND_LABEL]
+          ? ['client', TOKEN_RATE_LIMIT_CONSUMER_LABELS[consumer] || `Consumer Gateway ${consumer.toUpperCase()}`, 'quota-admitted', gatewayLabel, 'OpenAI route', 'api.openai.com']
+          : ['client', TOKEN_RATE_LIMIT_CONSUMER_LABELS[consumer] || `Consumer Gateway ${consumer.toUpperCase()}`, 'quota-admitted', provider, TOKEN_RATE_LIMIT_BACKEND_LABEL]
         : ['client', TOKEN_RATE_LIMIT_CONSUMER_LABELS[consumer] || `Consumer Gateway ${consumer.toUpperCase()}`, unavailable ? 'quota-unavailable' : quotaDenied ? 'quota-denied' : 'provider-error'],
     },
     http: { status, method: 'POST', path: '/v1/chat/completions' },
@@ -377,17 +372,6 @@ async function createTokenRateLimitRecord(consumer, appConfig = null, options = 
       retry_after_seconds: retryAfter,
     },
   };
-  const correlatedTrace = await correlateJaegerTrace(startedAt, inferenceProvider, provider);
-  if (correlatedTrace) {
-    record.trace = {
-      trace_id: correlatedTrace.trace_id,
-      jaeger_url: correlatedTrace.jaeger_url,
-      spans: correlatedTrace.spans,
-      span_count: correlatedTrace.span_count,
-      quality: 'exact',
-    };
-    record.trace_id = correlatedTrace.trace_id;
-  }
   tokenRateLimitHistory.push(record);
   if (tokenRateLimitHistory.length > TOKEN_RATE_LIMIT_HISTORY_LIMIT) tokenRateLimitHistory.shift();
   record.principal = appConfig?.username || TOKEN_RATE_LIMIT_USERNAME;
@@ -901,10 +885,10 @@ async function runVcrSustainedLoadJob(job, ip) {
 // Jaeger proxy helpers
 // ---------------------------------------------------------------------------
 
-function jaegerFetch(path, timeoutMs = 3000) {
+function jaegerFetch(path) {
   return new Promise((resolve, reject) => {
     const url = `${JAEGER_URL}${path}`;
-    const req = http.get(url, { timeout: timeoutMs }, (res) => {
+    const req = http.get(url, { timeout: 3000 }, (res) => {
       let data = '';
       res.on('data', chunk => { data += chunk; });
       res.on('end', () => {
@@ -916,7 +900,7 @@ function jaegerFetch(path, timeoutMs = 3000) {
       });
     });
     req.on('error', reject);
-    req.on('timeout', () => { req.destroy(new Error(`timeout after ${timeoutMs}ms`)); });
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
   });
 }
 
@@ -930,30 +914,26 @@ async function isJaegerReachable() {
 }
 
 const JAEGER_SERVICES = [
-  'grid-tracing-poc', 'consumer-gateway', 'praxis',
+  'grid-tracing-poc', 'consumer-gateway', 'praxis-ai',
   'praxis-gtm-emulator', 'praxis-east-edge', 'praxis-west-edge',
   'praxis-east-provider', 'praxis-west-provider',
 ];
 
 async function fetchLiveTraces(service, limit) {
   try {
-    // Praxis traces contain many filter spans. Keep each service query bounded
-    // so a large Jaeger response cannot make the UI appear empty on timeout.
-    const result = await jaegerFetch(`/api/traces?service=${encodeURIComponent(service)}&limit=${limit}`, 10000);
+    const result = await jaegerFetch(`/api/traces?service=${service}&limit=${limit}`);
     if (result.status !== 200 || !result.body.data) return [];
     return result.body.data.map(parseJaegerTrace).filter(Boolean);
-  } catch (error) {
-    console.warn(`[tracing] Jaeger query failed for service=${service}: ${error.message}`);
+  } catch {
     return [];
   }
 }
 
 async function fetchLiveTracesAllServices(limit) {
-  const perServiceLimit = Math.min(Math.max(limit, 20), 50);
   const allTraces = [];
   const seen = new Set();
-  const serviceResults = await Promise.all(JAEGER_SERVICES.map(svc => fetchLiveTraces(svc, perServiceLimit)));
-  for (const traces of serviceResults) {
+  for (const svc of JAEGER_SERVICES) {
+    const traces = await fetchLiveTraces(svc, limit);
     for (const t of traces) {
       if (!seen.has(t.trace_id)) {
         seen.add(t.trace_id);
@@ -963,45 +943,6 @@ async function fetchLiveTracesAllServices(limit) {
   }
   allTraces.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
   return allTraces.slice(0, limit);
-}
-
-// The token-rate-limit adapter receives gateway response headers, but the
-// gateways do not put the OTel trace ID in that response. Correlate the
-// completed request with the private Jaeger index so a live quota row can
-// still open exact spans. This is bounded and best-effort; request results
-// remain authoritative if Jaeger has not indexed the request yet.
-async function correlateJaegerTrace(startedAt, inferenceProvider, providerGateway) {
-  const targetMs = Date.parse(startedAt);
-  if (!Number.isFinite(targetMs)) return null;
-  // Jaeger indexing is asynchronous. Retry the read briefly so a successful
-  // live request does not become permanently uninspectable merely because its
-  // span arrived a few hundred milliseconds after the response.
-  for (const delayMs of [0, 250, 750, 1500]) {
-    if (delayMs) await new Promise(resolve => setTimeout(resolve, delayMs));
-    try {
-      const indexedTraces = await fetchLiveTracesAllServices(20);
-      if (!indexedTraces.length) continue;
-      const candidates = indexedTraces
-        .filter(Boolean)
-        .map(trace => {
-          const entries = trace.spans.flatMap(span => Object.entries(span.tags || {}));
-          const cluster = entries.find(([key]) => key === 'provider.backend.cluster')?.[1];
-          const gateway = entries.find(([key]) => key === 'provider.id')?.[1];
-          const distance = Math.abs(Date.parse(trace.timestamp || 0) - targetMs);
-          const providerMatch = inferenceProvider && cluster === inferenceProvider ? 0 : 1;
-          const gatewayMatch = providerGateway && gateway === providerGateway ? 0 : 1;
-          return { trace, distance, providerMatch, gatewayMatch };
-        })
-        .filter(item => item.distance <= 30_000)
-        .sort((a, b) => a.providerMatch - b.providerMatch
-          || a.gatewayMatch - b.gatewayMatch
-          || a.distance - b.distance);
-      if (candidates[0]?.trace) return candidates[0].trace;
-    } catch {
-      // Trace indexing is optional; leave the request as an honest boundary.
-    }
-  }
-  return null;
 }
 
 function parseJaegerTrace(trace) {
@@ -2308,10 +2249,7 @@ app.get('/api/v1/requests/:requestId', async (req, res) => {
 });
 
 app.get('/api/v1/requests/:requestId/trace', async (req, res) => {
-  // Live token-rate-limit rows are kept in the quota adapter history rather
-  // than the general request dataset. Include both sources so a selected
-  // live row can resolve its correlated Jaeger trace.
-  const all = [...tokenRateLimitHistory, ...(await normalizedRequestDataset())];
+  const all = await normalizedRequestDataset();
   const request = all.find(item => item.request_id === req.params.requestId || item.trace_id === req.params.requestId);
   if (!request) return res.status(404).json({ error: 'request not found' });
   if (request.trace_id && !request.trace_id.startsWith('000000000000000000000000000000')) {
@@ -3011,10 +2949,7 @@ async function cbReadGpuMetrics() {
 
 function cbSpanNumber(request, names) {
   for (const span of request?.spans || []) {
-    const tags = Array.isArray(span.tags)
-      ? span.tags
-      : Object.entries(span.tags || {}).map(([key, value]) => ({ key, value }));
-    for (const tag of tags) {
+    for (const tag of span.tags || []) {
       if (names.includes(tag.key)) {
         const value = cbNumeric(tag.value);
         if (value !== null) return value;
@@ -3216,10 +3151,11 @@ async function cbRunMetric(provider, queue) {
 async function cbSetProviderDisabled(provider, disabled) {
   const providerName = cbSimProviderName(provider);
   if (!providerName) throw new Error(`unknown configured simulator: ${provider}`);
-  // Remove/restore Service endpoints through the simulator Deployment. Grid's
-  // normal health evaluation withdraws or restores the candidate; the UI does
-  // not forge an overlay or alter request-time routing.
-  await cbKubectl(['scale', `deploy/${providerName}`, `--replicas=${disabled ? 0 : 1}`], CB_CONTROL_TIMEOUT);
+  // Disabling the simulator removes its Service endpoints. Grid's normal
+  // health evaluation then withdraws the candidate; no overlay is forged by
+  // the UI and no request-path behavior is changed.
+  const replicas = disabled ? 0 : 1;
+  await cbKubectl(['scale', `deploy/${providerName}`, `--replicas=${replicas}`], CB_CONTROL_TIMEOUT);
   cloudBurstControlState.disabled[provider] = disabled;
   cloudBurstControlState.health[provider] = disabled ? 'disabled' : 'healthy';
   await cbReconcile();
