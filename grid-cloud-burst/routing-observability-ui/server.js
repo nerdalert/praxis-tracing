@@ -3161,6 +3161,28 @@ async function cbSetProviderDisabled(provider, disabled) {
   await cbReconcile();
 }
 
+async function cbRefreshProviderReplicaState() {
+  try {
+    const resources = CB_SIM_PROVIDER_NAMES.map(name => `deployment/${name}`);
+    const document = JSON.parse(await cbKubectl(['get', ...resources, '-o', 'json']));
+    const deployments = Array.isArray(document.items) ? document.items : [document];
+    const replicas = new Map(deployments.map(item => [
+      item?.metadata?.name,
+      Number(item?.spec?.replicas ?? 0),
+    ]));
+    CB_LOCAL_PROVIDER_KEYS.forEach((key, index) => {
+      const simulator = CB_SIM_PROVIDER_NAMES[index];
+      if (!replicas.has(simulator)) return;
+      const disabled = replicas.get(simulator) === 0;
+      cloudBurstControlState.disabled[key] = disabled;
+      if (disabled) cloudBurstControlState.health[key] = 'disabled';
+      else if (cloudBurstControlState.health[key] === 'disabled') cloudBurstControlState.health[key] = 'healthy';
+    });
+  } catch {
+    // Preserve the last observed state during a transient Kubernetes read failure.
+  }
+}
+
 async function cbRunMetrics(values) {
   for (const [provider, queue] of Object.entries(values)) {
     const providerName = cbSimProviderName(provider);
@@ -3556,6 +3578,7 @@ app.get('/api/v1/cloud-burst', async (_req, res) => {
     const raw = await cbKubectl(['get', 'configmap', CB_OVERLAY_CM, '-o',
       'jsonpath={.data.routing-overlay\\.json}']);
     const document = JSON.parse(raw);
+    await cbRefreshProviderReplicaState();
     // The Grid operator exposes the semantic overlay in routing-config.json,
     // while the Praxis validator consumes the enveloped routing-overlay.json.
     // Accept both shapes so the RHOAI UI reads the live operator ConfigMap.
@@ -3568,9 +3591,10 @@ app.get('/api/v1/cloud-burst', async (_req, res) => {
       const model = c.name || c.model || '';
       const identity = `${model} ${c.site || ''} ${c.cluster || ''}`;
       const bedrock = /bedrock/i.test(identity);
-      const openai = /openai|cloud/i.test(identity);
+      const azure = /azure/i.test(identity);
+      const openai = /openai/i.test(identity);
       const suffix = String(c.cluster || c.site || '').match(/(?:static-)?(?:openai-)?([abc])$/i)?.[1]?.toLowerCase();
-      const external = Boolean(c.credential) || c.backend_kind === 'api_provider' || openai || bedrock;
+      const external = Boolean(c.credential) || c.backend_kind === 'api_provider' || openai || azure || bedrock;
       return {
         site: c.site, cluster: c.cluster, model, group: c.selection_group ?? 0,
         admission: c.admission_state || null, tier: c.selection_tier || null,
@@ -3578,7 +3602,7 @@ app.get('/api/v1/cloud-burst', async (_req, res) => {
         // backend_kind is intentionally not used to label cloud providers:
         // both OpenAI and Bedrock are generic api_provider routes. The
         // provider identity comes from the accepted candidate name.
-        provider: bedrock ? 'bedrock' : external ? 'openai' : 'local',
+        provider: bedrock ? 'bedrock' : azure ? 'azure' : openai ? 'openai' : external ? 'external' : 'local',
         // The static resources use one provider gateway per local suffix.
         // Bedrock is the standalone overflow endpoint attached to gateway A;
         // it is still rendered as its own overflow candidate below that card.

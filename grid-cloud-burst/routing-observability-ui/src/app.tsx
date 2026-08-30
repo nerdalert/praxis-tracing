@@ -940,9 +940,9 @@ function TokenPanel() {
               <thead>
                 <tr>
                   <th>#</th>
+                  <th>Time</th>
                   <th>Application / consumer</th>
                   <th>Admission</th>
-                  <th>Remaining</th>
                   <th>Observed path</th>
                   <th>HTTP</th>
                 </tr>
@@ -952,9 +952,9 @@ function TokenPanel() {
                   visibleTokenRows.map((r, i) => (
                     <tr key={i}>
                       <td>{(Math.min(tokenRequestPage, tokenRequestPageCount) - 1) * REQUESTS_PER_PAGE + i + 1}</td>
+                      <td className="mono">{time(r.started_at || r.timestamp)}</td>
                       <td className="token-request-identity"><strong>{r.application || r.principal || "—"}</strong><small>{title(r.consumer)}</small></td>
                       <td>{r.admission || "—"}</td>
-                      <td>{r.quota?.remaining ?? r.remaining ?? "—"}</td>
                       <td><TokenPath row={r} /><TokenSettlement row={r} /></td>
                       <td>{r.status || "—"}</td>
                     </tr>
@@ -1240,7 +1240,12 @@ export function App() {
     const onTokenUpdate = (event: Event) => {
       const record = (event as CustomEvent<RequestItem>).detail;
       if (record) {
-        void refresh().finally(() => selectRequest(record));
+        setRequests((current) => [
+          record,
+          ...current.filter((item) =>
+            (item.request_id || item.id) !== (record.request_id || record.id)),
+        ]);
+        void refresh();
       } else {
         void refresh();
       }

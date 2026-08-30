@@ -38,6 +38,7 @@ export default function CloudBurstPanel() {
   const [cost, setCost] = useState<CBCost | null>(null);
   const [controlError, setControlError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [providerBusy, setProviderBusy] = useState<Record<string, boolean>>({});
   // Backend-sensitivity mode: "sim" (kind mock, deep queue) vs "gpu" (real GPU,
   // saturates fast). Drives generator load AND gauge capacity. Defaults to the
   // server's TRACING_UI_CB_MODE once the first status arrives.
@@ -121,7 +122,14 @@ export default function CloudBurstPanel() {
   const runScenario = (id: string) => control("scenario", { id });
   const publishWeights = () => control("weights", weights);
   const setHealth = (provider: string, state: string) => control("health", { provider, state });
-  const setProviderDisabled = (provider: string, disabled: boolean) => control("provider", { provider, disabled });
+  const setProviderDisabled = async (provider: string, disabled: boolean) => {
+    setProviderBusy((current) => ({ ...current, [provider]: true }));
+    try {
+      await control("provider", { provider, disabled });
+    } finally {
+      setProviderBusy((current) => ({ ...current, [provider]: false }));
+    }
+  };
   const setAllocation = (enforcement: string, limit = allocationLimit) => control("allocation", { principal: "loadgen", enforcement, limit });
 
   const tour = [
@@ -148,9 +156,11 @@ export default function CloudBurstPanel() {
   const pressureActive = Boolean(s.pressure_active ?? s.local_admission === "existing_only");
   const burst = Boolean(s.cloud_burst_active ?? s.burst_active);
   const pressureRunning = Boolean(s.load_on || pressureActive);
-  const localProviders = (s.controls?.providers || []).filter((provider) => (s.groups || []).some((candidate) => !candidate.external && candidate.cluster === provider.name));
-  const localKeys = localProviders.map((provider) => provider.key);
-  const disabledProviderNames = new Set(localProviders.filter((provider) => s.controls?.disabled?.[provider.key]).map((provider) => provider.name));
+  const configuredProviders = s.controls?.providers || [];
+  const overlayProviders = s.groups || [];
+  const localProviders = configuredProviders;
+  const localKeys = configuredProviders.map((provider) => provider.key);
+  const disabledProviderNames = new Set(configuredProviders.filter((provider) => s.controls?.disabled?.[provider.key]).map((provider) => provider.name));
   const isGpu = activeMode === "gpu";
   const gatewayDisplayName = (value: string) => {
     const normalized = String(value || "provider").replace(/^(qwen|openai)-/i, "").replace(/-(local|cloud)$/i, "");
@@ -160,7 +170,14 @@ export default function CloudBurstPanel() {
       .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
       .join(" ");
   };
-  const gateways = Object.values((s.groups || []).reduce<Record<string, { id: string; site: string; candidates: CBGroup[] }>>((all, candidate) => {
+  const withdrawnProviders: CBGroup[] = configuredProviders
+    .filter((provider) => !overlayProviders.some((candidate) => candidate.cluster === provider.name))
+    .map((provider) => {
+      const locality = String(provider.name).match(/(east|west|central)/i)?.[1]?.toLowerCase() || "local";
+      return { site: `${locality}-local`, cluster: provider.name, group: null, admission: null, tier: "withdrawn", external: false, provider: "local", withdrawn: true };
+    });
+  const displayProviders = [...overlayProviders, ...withdrawnProviders];
+  const gateways = Object.values(displayProviders.reduce<Record<string, { id: string; site: string; candidates: CBGroup[] }>>((all, candidate) => {
     // The overlay has one candidate per backend route. For the symmetric
     // topology, openai-west/openai-central/openai-east share the physical
     // west/central/east provider gateway with their local vLLM candidates.
@@ -283,7 +300,7 @@ export default function CloudBurstPanel() {
             const health = s.controls?.health?.[key] || "healthy";
             return <div className={`cb-disable-card ${disabled || health === "unhealthy" ? "cb-disable-card-off" : ""}`} key={key}>
               <div><strong>{name}</strong><small>{simulator} · {disabled ? "disabled" : health}</small></div>
-              <button className="secondary-button" disabled={busy} onClick={() => setProviderDisabled(key, !disabled)}>{disabled ? "Enable vLLM" : "Disable vLLM"}</button>
+              <button className="secondary-button" disabled={Boolean(providerBusy[key])} onClick={() => setProviderDisabled(key, !disabled)}>{providerBusy[key] ? "Updating…" : disabled ? "Restore vLLM" : "Disable vLLM"}</button>
             </div>;
           })}
         </div>
@@ -326,21 +343,25 @@ export default function CloudBurstPanel() {
                   <Edge x1={330} y1={aY + 28} x2={480} y2={gwY + 28} color={gwColor} />
                   <Edge x1={330} y1={bY + 28} x2={480} y2={gwY + 28} color={gwColor} />
                   <Node x={480} y={gwY} w={190} label={`${gatewayDisplayName(gateway.site)} provider gateway`}
-                    sub={`${gateway.candidates.map((c) => `g${c.group}`).join(" / ")} · ${gatewayActive ? (eligible ? "accepting new" : "active") : "not accepting connections"}`}
+                    sub={`${gateway.candidates.map((c) => c.group == null ? "withdrawn" : `g${c.group}`).join(" / ")} · ${gatewayActive ? (eligible ? "accepting new" : "active") : "not accepting connections"}`}
                     tone={gwTone} />
                   {children.map(({ candidate, y }) => {
                     const candidateDisabled = !candidate.external && disabledProviderNames.has(candidate.cluster);
+                    const candidateWithdrawn = Boolean(candidate.withdrawn);
                     const candidateActive = !candidateDisabled && candidate.admission === "new_and_existing" && candidate.fresh !== false;
                     const candidatePressure = !candidateDisabled && candidate.admission === "existing_only";
                     const edgeColor = candidateDisabled ? RED : candidateActive ? GREEN : candidatePressure ? AMBER : RED;
                     const nodeTone = candidateDisabled || (!candidateActive && !candidatePressure) ? "unavailable" : candidatePressure ? "pressure" : "active";
                     const detail = candidate.external ? "overflow" : (candidate.tier === "same_site" ? "local" : String(candidate.tier || "").replace(/_/g, " "));
+                    const providerLabel = String(candidate.provider || "external")
+                      .replace(/[_-]+/g, " ")
+                      .replace(/\b\w/g, (letter) => letter.toUpperCase());
                     return (
                       <React.Fragment key={`${gateway.id}-${candidate.cluster}`}>
-                        <Edge x1={670} y1={gwY + 28} x2={800} y2={y + 28} color={edgeColor} dashed={candidateDisabled} />
+                        <Edge x1={670} y1={gwY + 28} x2={800} y2={y + 28} color={edgeColor} dashed={candidateDisabled || candidateWithdrawn} />
                         <Node x={800} y={y} w={280}
-                          label={candidate.external ? `${candidate.provider === "bedrock" ? "Bedrock" : "OpenAI"} route` : "vLLM backend"}
-                          sub={`${candidate.cluster} · g${candidate.group} · ${candidateDisabled ? "endpoint unavailable" : candidateActive ? "accepting new" : candidatePressure ? "pressure · existing only" : "not accepting connections"} · ${detail}`}
+                          label={candidate.external ? `${providerLabel} route` : "vLLM backend"}
+                          sub={`${candidate.cluster} · ${candidate.group == null ? "withdrawn" : `g${candidate.group}`} · ${candidateDisabled ? "endpoint unavailable" : candidateWithdrawn ? "recovering · awaiting overlay" : candidateActive ? "accepting new" : candidatePressure ? "pressure · existing only" : "not accepting connections"} · ${detail}`}
                           tone={nodeTone} />
                       </React.Fragment>
                     );
