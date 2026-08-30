@@ -445,12 +445,20 @@ label input {
   font-size: 10px;
 }
 .token-request-table {
-  min-width: 980px;
+  min-width: 900px;
+}
+.token-request-table th {
+  padding-right: 7px;
+  padding-left: 7px;
+}
+.token-request-table td {
+  padding-right: 7px;
+  padding-left: 7px;
 }
 .token-request-table th:nth-child(5),
 .token-request-table td:nth-child(5) {
   width: 48%;
-  min-width: 460px;
+  min-width: 420px;
 }
 .token-request-table td:nth-child(5) {
   white-space: normal;
