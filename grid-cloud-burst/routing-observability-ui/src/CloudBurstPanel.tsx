@@ -257,7 +257,10 @@ export default function CloudBurstPanel() {
   const RED = "#e11", GREEN = "#1f9d55", MUTE = "#8a8d90", AMBER = "#d98200";
   const gaugeColor = pressure >= ENTER ? RED : pressure >= 0.5 ? AMBER : GREEN;
   const money = (micros: number | null | undefined) => micros == null ? "—" : `$${(micros / 1_000_000).toFixed(6)}`;
-  const observedUsage = cost?.telemetry_quality === "token-type usage observed";
+  // Real cloud usage should render even when local usage is only estimated:
+  // the server reports "cloud usage real; local usage estimated" in that case.
+  const observedUsage = cost?.telemetry_quality === "token-type usage observed"
+    || cost?.telemetry_quality === "cloud usage real; local usage estimated";
   const totalHits = (cost?.local_hits || 0) + (cost?.cloud_hits || 0);
   const cloudShare = totalHits ? Math.round(((cost?.cloud_hits || 0) / totalHits) * 100) : 0;
 

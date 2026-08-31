@@ -181,4 +181,48 @@ describe('token-rate-limit feature gate', () => {
     assert.equal(cleared.data.requests.length, 0);
     assert.equal(calls, 4, 'clearing display history must not contact or mutate the upstream quota path');
   });
+
+  it('feeds admitted cloud-burst traffic and real token usage into the economics panel', async () => {
+    const upstream = await startUpstream((req, res) => {
+      req.resume();
+      // A cloud/overflow hit: attributed to an OpenAI provider and returning a
+      // real prompt/completion usage split.
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        'x-ai-demo-provider-gateway': 'west',
+        'x-ai-inference-provider': 'openai-west',
+      });
+      res.end(JSON.stringify({ model: 'gpt-4o', usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 } }));
+    });
+    const base = await start({
+      TRACING_UI_TOKEN_RATE_LIMIT: 'true',
+      TRACING_UI_TOKEN_CLOUD_BURST: 'true',
+      TRACING_UI_CB_CONTEXT: 'test',
+      TRACING_UI_TOKEN_CONSUMER_A_URL: upstream,
+      TRACING_UI_TOKEN_CONSUMER_B_URL: upstream,
+      TRACING_UI_TOKEN_PASSWORD: 'test-password',
+    });
+
+    // Before any traffic the panel is honestly empty.
+    const before = await (await fetch(`${base}/api/v1/cloud-burst/cost`)).json();
+    assert.equal(before.enabled, true);
+    assert.equal(before.cloud_hits, 0);
+    assert.equal(before.telemetry_quality, 'token-type usage unavailable');
+
+    const admitted = await (await fetch(`${base}/api/v1/token-rate-limit/requests`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ consumer: 'a' }),
+    })).json();
+    assert.equal(admitted.record.http.status, 200);
+
+    // The admitted request now shows up in the economics panel with its real
+    // token usage, priced by the example pricing revision.
+    const cost = await (await fetch(`${base}/api/v1/cloud-burst/cost`)).json();
+    assert.equal(cost.cloud_hits, 1, 'the cloud hit is counted');
+    assert.equal(cost.cloud_input_tokens, 100);
+    assert.equal(cost.cloud_output_tokens, 50);
+    assert.equal(cost.telemetry_quality, 'token-type usage observed');
+    // Example pricing: 100 in * $0.15/M + 50 out * $0.60/M = 45 micros.
+    assert.equal(cost.cloud_cost_micros, 45);
+    assert.equal(cost.pricing.revision, 'demo-pricing-unverified');
+  });
 });

@@ -2245,6 +2245,9 @@ app.post('/api/v1/token-rate-limit/requests', async (req, res) => {
   tokenRequestLog('api-received', { request_id: requestId, consumer, app: appConfig?.id || null });
   try {
     const record = await createTokenRateLimitRecord(consumer, appConfig, { request_id: requestId });
+    // Surface this admitted request (and its real token usage) in the
+    // cloud-burst economics panel when cloud burst is enabled. No-op otherwise.
+    recordCloudBurstTraffic(record);
     tokenRequestLog('api-complete', { request_id: requestId, consumer, status: 201, elapsed_ms: elapsedMs() });
     return res.status(201).json({ version: 'v1', source: 'live', record, data: liveTokenRateLimitData() });
   } catch (error) {
@@ -3387,6 +3390,40 @@ function cbQueueValue(value, preset) {
   return normalizeQueueDepth(value, { max: 1000 });
 }
 
+// Whether a completed request record used a cloud/overflow provider. Derived
+// from trusted response attribution (external provider) or a provider model
+// that differs from the logical model, never from a display default.
+function cbRecordIsCloud(record) {
+  return Boolean(record.external_provider)
+    || Boolean(record.response_model && record.response_model !== CB_LOGICAL_MODEL);
+}
+
+// Feed an admitted request record into the cloud-burst economics history so the
+// cost panel reflects the same traffic the operator generates from the demo.
+// Token counts are the real usage the gateway returned (OpenAI usage block for
+// cloud hits); nothing is fabricated. No-op when cloud burst is not enabled.
+function recordCloudBurstTraffic(record) {
+  if (!TOKEN_CLOUD_BURST) return null;
+  const cloud = cbRecordIsCloud(record);
+  cloudBurstTrafficHistory.push({
+    at: record.started_at,
+    request_id: record.request_id,
+    consumer: record.consumer_gateway,
+    provider: record.route?.provider_gateway,
+    cloud,
+    status: record.http?.status,
+    trace_id: record.trace?.trace_id,
+    input_tokens: record.input_tokens,
+    output_tokens: record.output_tokens,
+    total_tokens: record.quota?.actual_tokens,
+    requested_tokens: record.requested_tokens,
+    session: record.session_id || null,
+  });
+  if (cloudBurstTrafficHistory.length > 1000) cloudBurstTrafficHistory.shift();
+  cbCostCache = { expires: 0, value: null, pending: null };
+  return cloud;
+}
+
 async function cbTrafficRecord(consumer, sessionMode, appOverride = null) {
   const app = appOverride || { id: 'cloud-burst', username: CB_TRAFFIC_PRINCIPAL, password: CB_TRAFFIC_PASSWORD, model: CB_LOGICAL_MODEL, estimateTokens: 5, limit: 100000, windowSeconds: 600 };
   const sessionId = sessionMode === 'sticky'
@@ -3394,24 +3431,7 @@ async function cbTrafficRecord(consumer, sessionMode, appOverride = null) {
     : `cloud-burst-${Date.now()}-${randomUUID()}`;
   cloudBurstTrafficSequence += 1;
   const record = await createTokenRateLimitRecord(consumer, app, { session_id: sessionId });
-  const cloud = Boolean(record.external_provider)
-    || Boolean(record.response_model && record.response_model !== CB_LOGICAL_MODEL);
-  const item = {
-    at: record.started_at,
-    request_id: record.request_id,
-    consumer: record.consumer_gateway,
-    provider: record.route.provider_gateway,
-    cloud,
-    status: record.http.status,
-    trace_id: record.trace.trace_id,
-    input_tokens: record.input_tokens,
-    output_tokens: record.output_tokens,
-    total_tokens: record.quota.actual_tokens,
-    requested_tokens: record.requested_tokens,
-    session: sessionId,
-  };
-  cloudBurstTrafficHistory.push(item);
-  if (cloudBurstTrafficHistory.length > 1000) cloudBurstTrafficHistory.shift();
+  const cloud = recordCloudBurstTraffic(record) ?? cbRecordIsCloud(record);
   return { ...record, cloud, session_id: sessionId };
 }
 
