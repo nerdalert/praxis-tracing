@@ -223,6 +223,12 @@ const replayJobs = new Map();
 const tokenRateLimitHistory = [];
 let tokenRateLimitSequence = 0;
 
+function tokenRequestLog(event, fields = {}) {
+  console.info(JSON.stringify({
+    component: 'token-request', event, timestamp: new Date().toISOString(), ...fields,
+  }));
+}
+
 // This is the stable adapter contract for the future live OTel/HTTP source.
 // UI code consumes these normalized fields and does not depend on exporter-
 // specific attribute names.
@@ -246,8 +252,10 @@ function parseOptionalInteger(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function tokenRateLimitRequest(consumer, appConfig = null, sessionId = null) {
+function tokenRateLimitRequest(consumer, appConfig = null, sessionId = null, requestId = 'unassigned') {
   return new Promise((resolve, reject) => {
+    const started = process.hrtime.bigint();
+    const elapsedMs = () => Math.round(Number(process.hrtime.bigint() - started) / 1e6);
     const target = new URL(TOKEN_RATE_LIMIT_CONSUMERS[consumer]);
     const client = target.protocol === 'https:' ? https : http;
     const maxTokens = Number.isInteger(appConfig?.maxTokens) ? appConfig.maxTokens : TOKEN_RATE_LIMIT_MAX_TOKENS;
@@ -274,6 +282,7 @@ function tokenRateLimitRequest(consumer, appConfig = null, sessionId = null) {
         ...(sessionId ? { 'X-Session-Id': sessionId } : {}),
       },
     }, response => {
+      tokenRequestLog('response-headers', { request_id: requestId, consumer, status: response.statusCode || 0, elapsed_ms: elapsedMs() });
       let responseBody = '';
       response.on('data', chunk => { responseBody += chunk; });
       response.on('end', () => {
@@ -290,18 +299,26 @@ function tokenRateLimitRequest(consumer, appConfig = null, sessionId = null) {
         }
         let responseModel = null;
         try { responseModel = JSON.parse(responseBody)?.model || null; } catch { /* non-inference response */ }
+        tokenRequestLog('response-complete', { request_id: requestId, consumer, status: response.statusCode || 0, elapsed_ms: elapsedMs() });
         resolve({ response, actualTokens, inputTokens, outputTokens, requestedTokens, responseModel, responseBody });
       });
     });
-    request.on('error', reject);
-    request.on('timeout', () => request.destroy(new Error('token-rate-limit request timed out')));
+    request.on('error', error => {
+      tokenRequestLog('request-error', { request_id: requestId, consumer, elapsed_ms: elapsedMs(), error: error.message });
+      reject(error);
+    });
+    request.on('timeout', () => {
+      tokenRequestLog('request-timeout', { request_id: requestId, consumer, elapsed_ms: elapsedMs(), timeout_ms: 30000 });
+      request.destroy(new Error('token-rate-limit request timed out'));
+    });
+    tokenRequestLog('request-start', { request_id: requestId, consumer, target_host: target.hostname });
     request.end(payload);
   });
 }
 
 async function createTokenRateLimitRecord(consumer, appConfig = null, options = {}) {
   const startedAt = new Date().toISOString();
-  const { response, actualTokens, inputTokens, outputTokens, requestedTokens, responseModel } = await tokenRateLimitRequest(consumer, appConfig, options.session_id || null);
+  const { response, actualTokens, inputTokens, outputTokens, requestedTokens, responseModel } = await tokenRateLimitRequest(consumer, appConfig, options.session_id || null, options.request_id);
   tokenRateLimitSequence += 1;
   const status = response.statusCode || 0;
   const provider = response.headers['x-ai-demo-provider-gateway']
@@ -2196,10 +2213,18 @@ app.post('/api/v1/token-rate-limit/requests', async (req, res) => {
   }
   const appConfig = TOKEN_RATE_LIMIT_MULTI_QUOTA ? TOKEN_RATE_LIMIT_APPS.find(entry => entry.id === req.body?.app) : null;
   if (TOKEN_RATE_LIMIT_MULTI_QUOTA && !appConfig) return res.status(400).json({ error: 'app must identify one configured application' });
+  const suppliedRequestId = req.get('x-ui-request-id');
+  const requestId = suppliedRequestId && /^[a-z0-9-]{8,80}$/i.test(suppliedRequestId)
+    ? suppliedRequestId : `ui-${Date.now()}`;
+  const started = process.hrtime.bigint();
+  const elapsedMs = () => Math.round(Number(process.hrtime.bigint() - started) / 1e6);
+  tokenRequestLog('api-received', { request_id: requestId, consumer, app: appConfig?.id || null });
   try {
-    const record = await createTokenRateLimitRecord(consumer, appConfig);
+    const record = await createTokenRateLimitRecord(consumer, appConfig, { request_id: requestId });
+    tokenRequestLog('api-complete', { request_id: requestId, consumer, status: 201, elapsed_ms: elapsedMs() });
     return res.status(201).json({ version: 'v1', source: 'live', record, data: liveTokenRateLimitData() });
   } catch (error) {
+    tokenRequestLog('api-error', { request_id: requestId, consumer, status: 502, elapsed_ms: elapsedMs(), error: error.message });
     return res.status(502).json({ error: `Consumer Gateway ${consumer.toUpperCase()} request failed: ${error.message}` });
   }
 });
@@ -3131,6 +3156,28 @@ async function cbReconcile() {
   await cbKubectl(['annotate', 'gridnetwork', CB_NETWORK, `grid.praxis-proxy.io/force-reconcile=${Date.now()}`, '--overwrite']);
 }
 
+async function cbSetRuntimeMetric(providerName, queue) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CB_CONTROL_TIMEOUT);
+  try {
+    const response = await fetch(
+      `http://${providerName}.grid-system.svc.cluster.local:8000/admin/config`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ 'fake-metrics': { 'waiting-requests': queue } }),
+        signal: controller.signal,
+      },
+    );
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`${providerName} metric update failed: HTTP ${response.status}${detail ? `: ${detail}` : ''}`);
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function cbRunMetric(provider, queue) {
   const providerName = cbSimProviderName(provider);
   if (!providerName) throw new Error(`unknown configured local provider: ${provider}`);
@@ -3143,8 +3190,7 @@ async function cbRunMetric(provider, queue) {
     'patch', 'configmap', name, '--type=merge',
     '-p', JSON.stringify({ data: { 'config.yaml': updated } }),
   ], CB_CONTROL_TIMEOUT);
-  await cbKubectl(['rollout', 'restart', `deploy/${providerName}`], CB_CONTROL_TIMEOUT);
-  await new Promise(resolve => setTimeout(resolve, 20000));
+  await cbSetRuntimeMetric(providerName, queue);
   cloudBurstControlState.metrics[provider] = queue;
 }
 
@@ -3197,19 +3243,19 @@ async function cbRunMetrics(values) {
       '-p', JSON.stringify({ data: { 'config.yaml': updated } }),
     ], CB_CONTROL_TIMEOUT);
   }
-  for (const provider of Object.keys(values)) {
+  await Promise.all(Object.entries(values).map(([provider, queue]) => {
     const providerName = cbSimProviderName(provider);
-    if (providerName) await cbKubectl(['rollout', 'restart', `deploy/${providerName}`], CB_CONTROL_TIMEOUT);
-  }
-  await new Promise(resolve => setTimeout(resolve, 20000));
+    return providerName ? cbSetRuntimeMetric(providerName, queue) : Promise.resolve();
+  }));
   Object.assign(cloudBurstControlState.metrics, values);
 }
 
 async function cbResetMetrics() {
   // Keep reset in the server's in-cluster control path.  The older helper
   // shell script assumes a host kubectl context and is not reliable from an
-  // OpenShift UI pod.  Reset every simulator independently, then restart it so
-  // the zero gauge is observable before the next Grid reconcile.
+  // OpenShift UI pod. Reset every simulator independently and update the live
+  // metric through the simulator's runtime configuration API.
+  const resets = [];
   for (const provider of CB_LOCAL_PROVIDER_KEYS) {
     const providerName = cbSimProviderName(provider);
     if (!providerName) continue;
@@ -3222,9 +3268,9 @@ async function cbResetMetrics() {
       'patch', 'configmap', name, '--type=merge',
       '-p', JSON.stringify({ data: { 'config.yaml': updated } }),
     ], CB_CONTROL_TIMEOUT);
-    await cbKubectl(['rollout', 'restart', `deploy/${providerName}`], CB_CONTROL_TIMEOUT);
+    resets.push(cbSetRuntimeMetric(providerName, 0));
   }
-  await new Promise(resolve => setTimeout(resolve, 20000));
+  await Promise.all(resets);
   cloudBurstControlState.metrics = Object.fromEntries(CB_LOCAL_PROVIDER_KEYS.map(key => [key, 0]));
 }
 
@@ -3234,7 +3280,6 @@ async function cbStopAllPressure() {
   // A GPU pressure deployment is optional on simulator-backed installs.
   // Absence is expected and must not make the stop control fail.
   try { await cbKubectl(['scale', 'deploy/epp-load', '--replicas=0'], CB_CONTROL_TIMEOUT); } catch { /* optional */ }
-  await cbReconcile();
 }
 
 function cbAllocationYaml(source, policy) {
@@ -3699,7 +3744,6 @@ app.post('/api/v1/cloud-burst/load', async (req, res) => {
       if (on) {
         const pressureQueue = cbQueueValue(undefined, 'pressure');
         await cbRunMetrics(Object.fromEntries(CB_LOCAL_PROVIDER_KEYS.map(provider => [provider, pressureQueue])));
-        await cbReconcile();
         return res.json({ ok: true, load_on: true, mode, replicas: CB_MODES[mode].replicas });
       }
       await cbStopAllPressure();

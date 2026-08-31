@@ -1361,7 +1361,7 @@ body.theme-dark .cb-mode select { background: #1b1d20; color: #e6e6e6; border-co
 .cb-hit-feed span { color: var(--muted, #666); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .cb-interactive-controls { margin-top: 18px; padding: 14px; border: 1px solid var(--border, #d7d7d7); border-radius: 9px; background: var(--card-subtle, #f8f8f8); }
 .cb-interactive-controls .cb-section-heading { margin: 0 0 12px; }
-.cb-provider-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.cb-provider-controls { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .cb-provider-slider { display: grid; gap: 6px; padding: 10px; border: 1px solid var(--border, #d7d7d7); border-top: 3px solid #1f9d55; border-radius: 7px; font-size: 11px; }
 .cb-provider-slider > span { display: flex; justify-content: space-between; gap: 8px; }
 .cb-provider-slider output { font-family: "IBM Plex Mono", monospace; color: var(--muted, #666); }
@@ -1387,6 +1387,7 @@ body.theme-dark .cb-mode select { background: #1b1d20; color: #e6e6e6; border-co
 .cb-disable-card small { color: var(--muted, #666); overflow-wrap: anywhere; }
 [data-theme="dark"] .cb-cost-metric { background: #202225; }
 [data-theme="dark"] .cb-quality-muted { background: #292b2f; color: #aaa; border-color: #444; }
+@media (max-width: 1100px) { .cb-provider-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 850px) { .cb-cost-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .cb-cost-footnote { display: grid; gap: 3px; } .cb-provider-controls { grid-template-columns: 1fr; } }
 [data-theme="dark"] .cb-gauge { background: #333; } [data-theme="dark"] .cb-node rect { fill: #262626; stroke: #444; }
 [data-theme="dark"] .cb-node.cb-active rect { fill: #10231a; } [data-theme="dark"] .cb-node.cb-unavailable rect { fill: #2a1010; }

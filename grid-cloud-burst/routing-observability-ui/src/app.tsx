@@ -757,16 +757,25 @@ function TokenPanel() {
   }, [refresh]);
   const live = status?.source === "live" || status?.mode === "live";
   const request = async (consumer: "a" | "b", app?: string) => {
+    const requestId = `ui-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const started = performance.now();
+    console.info("[token-request] start", { requestId, consumer, app: app || null });
     setBusy(true);
     try {
-      const result = await api.tokenRequest(consumer, app, app ? charges[app] || 5 : undefined);
+      const result = await api.tokenRequest(consumer, app, app ? charges[app] || 5 : undefined, requestId);
+      console.info("[token-request] response", { requestId, elapsedMs: Math.round(performance.now() - started) });
       await refresh();
+      console.info("[token-request] refresh-complete", { requestId, elapsedMs: Math.round(performance.now() - started) });
       window.dispatchEvent(
         new CustomEvent("token-rate-limit-updated", {
           detail: (result as any).record || null,
         }),
       );
+    } catch (error) {
+      console.error("[token-request] error", { requestId, elapsedMs: Math.round(performance.now() - started), error: error instanceof Error ? error.message : String(error) });
+      throw error;
     } finally {
+      console.info("[token-request] finished", { requestId, elapsedMs: Math.round(performance.now() - started) });
       setBusy(false);
     }
   };

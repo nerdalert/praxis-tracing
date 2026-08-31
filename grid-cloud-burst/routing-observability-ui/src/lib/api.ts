@@ -38,8 +38,18 @@ export const api = {
       `/api/v1/token-rate-limit${state ? `?state=${encodeURIComponent(state)}` : ""}`,
     ),
   cloudBurst: () => get<Record<string, unknown>>("/api/v1/cloud-burst"),
-  tokenRequest: (consumer: "a" | "b", app?: string, tokens?: number) =>
-    post("/api/v1/token-rate-limit/requests", { consumer, app, tokens }),
+  tokenRequest: (consumer: "a" | "b", app?: string, tokens?: number, requestId?: string) =>
+    fetch("/api/v1/token-rate-limit/requests", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(requestId ? { "X-UI-Request-ID": requestId } : {}),
+      },
+      body: JSON.stringify({ consumer, app, tokens }),
+    }).then(async (response) => {
+      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+      return response.json();
+    }),
   clearTokenResults: () =>
     fetch("/api/v1/token-rate-limit/requests", { method: "DELETE" }).then((r) =>
       r.json(),
