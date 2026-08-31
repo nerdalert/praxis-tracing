@@ -7,6 +7,14 @@ import http from 'http';
 import https from 'https';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import {
+  normalizeQueueDepth,
+  providerInventory,
+  runMetric as cbRunMetricCore,
+  runMetrics as cbRunMetricsCore,
+  resetMetrics as cbResetMetricsCore,
+  stopAllPressure as cbStopAllPressureCore,
+} from './cloud-burst-metrics.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -325,6 +333,7 @@ async function createTokenRateLimitRecord(consumer, appConfig = null, options = 
     || response.headers['x-grid-combined-provider-gateway']
     || response.headers['x-grid-llmd-provider-gateway']
     || null;
+  const inferenceProvider = response.headers['x-ai-inference-provider'] || null;
   const limit = parseOptionalInteger(rateLimitHeader(response.headers, 'x-ratelimit-limit'));
   const remaining = parseOptionalInteger(rateLimitHeader(response.headers, 'x-ratelimit-remaining'));
   const resetSeconds = parseOptionalInteger(rateLimitHeader(response.headers, 'x-ratelimit-reset'));
@@ -332,12 +341,27 @@ async function createTokenRateLimitRecord(consumer, appConfig = null, options = 
   const governance = typeof response.headers['x-ratelimit-governance'] === 'string'
     ? response.headers['x-ratelimit-governance'] : null;
   const admitted = status >= 200 && status < 300;
-  const unavailable = status === 503;
-  const quotaDenied = status === 429 || status === 529;
-  const externalProvider = Boolean(response.headers['x-openai-proxy-wasm']);
+  const providerAttributed = Boolean(provider || inferenceProvider);
+  const unavailable = status === 503 && !providerAttributed;
+  const quotaDenied = (status === 429 || status === 529) && !providerAttributed;
+  const providerRateLimited = (status === 429 || status === 529) && providerAttributed;
+  const providerIdentity = `${provider || ''} ${inferenceProvider || ''}`.toLowerCase();
+  const azureProvider = providerIdentity.includes('azure');
+  const openAiProvider = Boolean(response.headers['x-openai-proxy-wasm'])
+    || providerIdentity.includes('openai') || providerIdentity.includes('api.openai.com');
+  const externalProvider = azureProvider || openAiProvider;
   const gatewayLabel = provider
     ? `${String(provider).replace(/\b\w/g, letter => letter.toUpperCase())} provider gateway`
     : 'OpenAI provider gateway';
+  const consumerLabel = TOKEN_RATE_LIMIT_CONSUMER_LABELS[consumer] || `Consumer Gateway ${consumer.toUpperCase()}`;
+  const attributedHops = providerAttributed
+    ? [
+      'client', consumerLabel, 'quota-admitted', gatewayLabel,
+      ...(azureProvider ? ['Azure route', inferenceProvider || provider]
+        : openAiProvider ? ['OpenAI route', inferenceProvider || 'api.openai.com']
+          : [inferenceProvider || provider]),
+    ]
+    : null;
   const reservationEstimate = appConfig?.estimateTokens || 5;
   const settlementAdjustment = actualTokens === null ? null : reservationEstimate - actualTokens;
   const record = {
@@ -374,18 +398,18 @@ async function createTokenRateLimitRecord(consumer, appConfig = null, options = 
     session_id: options.session_id || null,
     route: {
       provider_gateway: provider,
+      inference_provider: inferenceProvider,
       overlay_revision: response.headers['x-grid-overlay-revision'] || null,
-      hops: admitted && provider
-        ? externalProvider
-          ? ['client', TOKEN_RATE_LIMIT_CONSUMER_LABELS[consumer] || `Consumer Gateway ${consumer.toUpperCase()}`, 'quota-admitted', gatewayLabel, 'OpenAI route', 'api.openai.com']
-          : ['client', TOKEN_RATE_LIMIT_CONSUMER_LABELS[consumer] || `Consumer Gateway ${consumer.toUpperCase()}`, 'quota-admitted', provider, TOKEN_RATE_LIMIT_BACKEND_LABEL]
-        : ['client', TOKEN_RATE_LIMIT_CONSUMER_LABELS[consumer] || `Consumer Gateway ${consumer.toUpperCase()}`, unavailable ? 'quota-unavailable' : quotaDenied ? 'quota-denied' : 'provider-error'],
+      hops: attributedHops
+        || ['client', consumerLabel, unavailable ? 'quota-unavailable' : quotaDenied ? 'quota-denied' : 'provider-error'],
     },
     http: { status, method: 'POST', path: '/v1/chat/completions' },
     trace: { trace_id: null, jaeger_url: null, spans: [] },
     started_at: startedAt,
     error: admitted ? null : {
-      type: unavailable ? 'quota_backend_unavailable' : quotaDenied ? 'quota_exhausted' : 'provider_upstream_error',
+      type: unavailable ? 'quota_backend_unavailable'
+        : quotaDenied ? 'quota_exhausted'
+          : providerRateLimited ? 'provider_rate_limited' : 'provider_upstream_error',
       retry_after_seconds: retryAfter,
     },
   };
@@ -3178,20 +3202,24 @@ async function cbSetRuntimeMetric(providerName, queue) {
   }
 }
 
+// Shared effects for the extracted cloud-burst metric control. Injecting these
+// keeps the queue-slider path a single tested unit (cloud-burst-metrics.js)
+// while the endpoints below stay thin.
+function cbMetricDeps() {
+  return {
+    kubectl: cbKubectl,
+    setRuntimeMetric: cbSetRuntimeMetric,
+    simProviderName: cbSimProviderName,
+    providerKeys: CB_LOCAL_PROVIDER_KEYS,
+    controlTimeout: CB_CONTROL_TIMEOUT,
+    loadDeploy: CB_LOAD_DEPLOY,
+    state: cloudBurstControlState,
+    cancelPressureJob: () => { if (cloudBurstPressureJob) cloudBurstPressureJob.cancelled = true; },
+  };
+}
+
 async function cbRunMetric(provider, queue) {
-  const providerName = cbSimProviderName(provider);
-  if (!providerName) throw new Error(`unknown configured local provider: ${provider}`);
-  const name = `${providerName}-config`;
-  const document = JSON.parse(await cbKubectl(['get', 'configmap', name, '-o', 'json']));
-  const source = document?.data?.['config.yaml'];
-  if (typeof source !== 'string') throw new Error(`${name} config.yaml is unavailable`);
-  const updated = source.replace(/waiting-requests:\s*[^\n]*/, `waiting-requests: ${queue}`);
-  await cbKubectl([
-    'patch', 'configmap', name, '--type=merge',
-    '-p', JSON.stringify({ data: { 'config.yaml': updated } }),
-  ], CB_CONTROL_TIMEOUT);
-  await cbSetRuntimeMetric(providerName, queue);
-  cloudBurstControlState.metrics[provider] = queue;
+  await cbRunMetricCore(cbMetricDeps(), provider, queue);
 }
 
 async function cbSetProviderDisabled(provider, disabled) {
@@ -3230,56 +3258,15 @@ async function cbRefreshProviderReplicaState() {
 }
 
 async function cbRunMetrics(values) {
-  for (const [provider, queue] of Object.entries(values)) {
-    const providerName = cbSimProviderName(provider);
-    if (!providerName) continue;
-    const name = `${providerName}-config`;
-    const document = JSON.parse(await cbKubectl(['get', 'configmap', name, '-o', 'json']));
-    const source = document?.data?.['config.yaml'];
-    if (typeof source !== 'string') throw new Error(`${name} config.yaml is unavailable`);
-    const updated = source.replace(/waiting-requests:\s*[^\n]*/, `waiting-requests: ${queue}`);
-    await cbKubectl([
-      'patch', 'configmap', name, '--type=merge',
-      '-p', JSON.stringify({ data: { 'config.yaml': updated } }),
-    ], CB_CONTROL_TIMEOUT);
-  }
-  await Promise.all(Object.entries(values).map(([provider, queue]) => {
-    const providerName = cbSimProviderName(provider);
-    return providerName ? cbSetRuntimeMetric(providerName, queue) : Promise.resolve();
-  }));
-  Object.assign(cloudBurstControlState.metrics, values);
+  await cbRunMetricsCore(cbMetricDeps(), values);
 }
 
 async function cbResetMetrics() {
-  // Keep reset in the server's in-cluster control path.  The older helper
-  // shell script assumes a host kubectl context and is not reliable from an
-  // OpenShift UI pod. Reset every simulator independently and update the live
-  // metric through the simulator's runtime configuration API.
-  const resets = [];
-  for (const provider of CB_LOCAL_PROVIDER_KEYS) {
-    const providerName = cbSimProviderName(provider);
-    if (!providerName) continue;
-    const name = `${providerName}-config`;
-    const document = JSON.parse(await cbKubectl(['get', 'configmap', name, '-o', 'json']));
-    const source = document?.data?.['config.yaml'];
-    if (typeof source !== 'string') throw new Error(`${name} config.yaml is unavailable`);
-    const updated = source.replace(/waiting-requests:\s*[^\n]*/, 'waiting-requests: 0');
-    await cbKubectl([
-      'patch', 'configmap', name, '--type=merge',
-      '-p', JSON.stringify({ data: { 'config.yaml': updated } }),
-    ], CB_CONTROL_TIMEOUT);
-    resets.push(cbSetRuntimeMetric(providerName, 0));
-  }
-  await Promise.all(resets);
-  cloudBurstControlState.metrics = Object.fromEntries(CB_LOCAL_PROVIDER_KEYS.map(key => [key, 0]));
+  await cbResetMetricsCore(cbMetricDeps());
 }
 
 async function cbStopAllPressure() {
-  if (cloudBurstPressureJob) cloudBurstPressureJob.cancelled = true;
-  await cbResetMetrics();
-  // A GPU pressure deployment is optional on simulator-backed installs.
-  // Absence is expected and must not make the stop control fail.
-  try { await cbKubectl(['scale', 'deploy/epp-load', '--replicas=0'], CB_CONTROL_TIMEOUT); } catch { /* optional */ }
+  await cbStopAllPressureCore(cbMetricDeps());
 }
 
 function cbAllocationYaml(source, policy) {
@@ -3394,9 +3381,10 @@ function cbQueueValue(value, preset) {
     if (preset === 'saturate') return Math.max(CB_QUEUE_CAPACITY + 1, CB_QUEUE_CAPACITY * 2);
     throw new Error('preset must be calm, pressure, or saturate');
   }
-  const number = Number(value);
-  if (!Number.isFinite(number) || number < 0 || number > 1000) throw new Error('metric value must be between 0 and 1000');
-  return number <= 1 ? Math.round(number * CB_QUEUE_CAPACITY) : Math.round(number);
+  // Interactive slider values are integer queue depths (0..N waiting requests),
+  // not a 0..1 ratio of capacity. Zero must stay zero and low values must not
+  // be silently scaled up (previously value 1 became CB_QUEUE_CAPACITY).
+  return normalizeQueueDepth(value, { max: 1000 });
 }
 
 async function cbTrafficRecord(consumer, sessionMode, appOverride = null) {

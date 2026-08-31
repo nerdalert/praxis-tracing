@@ -102,9 +102,13 @@ describe('token-rate-limit feature gate', () => {
       calls += 1;
       req.resume();
       if (calls === 1) {
-        res.writeHead(200, { 'content-type': 'application/json', 'x-ai-demo-provider-gateway': 'west' });
+        res.writeHead(200, {
+          'content-type': 'application/json',
+          'x-ai-demo-provider-gateway': 'west',
+          'x-ai-inference-provider': 'llm-d-west-2',
+        });
         res.end(JSON.stringify({ usage: { total_tokens: 15 } }));
-      } else {
+      } else if (calls === 2) {
         res.writeHead(429, {
           'content-type': 'application/json',
           'retry-after': '60',
@@ -113,6 +117,21 @@ describe('token-rate-limit feature gate', () => {
           'x-ratelimit-reset': '60',
         });
         res.end(JSON.stringify({ error: 'quota exhausted' }));
+      } else if (calls === 3) {
+        res.writeHead(429, {
+          'content-type': 'application/json',
+          'x-ai-demo-provider-gateway': 'west',
+          'x-ai-inference-provider': 'openai-west',
+        });
+        res.end(JSON.stringify({ error: { type: 'rate_limit_error' } }));
+      } else {
+        res.writeHead(429, {
+          'content-type': 'application/json',
+          'retry-after': '30',
+          'x-ai-demo-provider-gateway': 'azure-east',
+          'x-ai-inference-provider': 'azure-upstream',
+        });
+        res.end(JSON.stringify({ error: { type: 'too_many_requests' } }));
       }
     });
     const base = await start({
@@ -129,6 +148,8 @@ describe('token-rate-limit feature gate', () => {
     })).json();
     assert.equal(admitted.record.http.status, 200);
     assert.equal(admitted.record.route.provider_gateway, 'west');
+    assert.equal(admitted.record.route.inference_provider, 'llm-d-west-2');
+    assert.deepEqual(admitted.record.route.hops, ['client', 'consumer-gateway-a', 'quota-admitted', 'West provider gateway', 'llm-d-west-2']);
     assert.equal(admitted.record.quota.actual_tokens, 15);
 
     const denied = await (await fetch(`${base}/api/v1/token-rate-limit/requests`, {
@@ -138,12 +159,26 @@ describe('token-rate-limit feature gate', () => {
     assert.equal(denied.record.route.provider_gateway, null);
     assert.equal(denied.record.quota.remaining, 0);
     assert.deepEqual(denied.record.route.hops, ['client', 'consumer-gateway-b', 'quota-denied']);
-    assert.equal(authorizations.length, 2);
+
+    const openAiLimited = await (await fetch(`${base}/api/v1/token-rate-limit/requests`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ consumer: 'a' }),
+    })).json();
+    assert.equal(openAiLimited.record.admission, 'provider_error');
+    assert.equal(openAiLimited.record.error.type, 'provider_rate_limited');
+    assert.deepEqual(openAiLimited.record.route.hops, ['client', 'consumer-gateway-a', 'quota-admitted', 'West provider gateway', 'OpenAI route', 'openai-west']);
+
+    const azureLimited = await (await fetch(`${base}/api/v1/token-rate-limit/requests`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ consumer: 'b' }),
+    })).json();
+    assert.equal(azureLimited.record.admission, 'provider_error');
+    assert.equal(azureLimited.record.error.type, 'provider_rate_limited');
+    assert.deepEqual(azureLimited.record.route.hops, ['client', 'consumer-gateway-b', 'quota-admitted', 'Azure-East provider gateway', 'Azure route', 'azure-upstream']);
+    assert.equal(authorizations.length, 4);
     assert.ok(authorizations.every(value => value?.startsWith('Basic ')));
     assert.doesNotMatch(JSON.stringify(denied), /test-password/);
 
     const cleared = await (await fetch(`${base}/api/v1/token-rate-limit/requests`, { method: 'DELETE' })).json();
     assert.equal(cleared.data.requests.length, 0);
-    assert.equal(calls, 2, 'clearing display history must not contact or mutate the upstream quota path');
+    assert.equal(calls, 4, 'clearing display history must not contact or mutate the upstream quota path');
   });
 });

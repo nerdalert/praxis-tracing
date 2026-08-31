@@ -130,6 +130,10 @@ function TokenPath({ row }: { row: any }) {
           ? "quota unavailable"
           : "quota denied",
       ];
+  const providerAttributed = Boolean(row.route?.provider_gateway || row.route?.inference_provider);
+  const errorSummary = row.error?.type === "provider_rate_limited"
+    ? "provider rate limited"
+    : providerAttributed ? "provider error" : "no provider hop";
   return (
     <div
       className={`token-path ${row.admission === "admitted" ? "admitted" : "stopped"}`}
@@ -154,7 +158,7 @@ function TokenPath({ row }: { row: any }) {
         </Fragment>
       ))}
       {row.admission !== "admitted" && (
-        <small className="token-no-hop">{row.http?.status || row.status || "429"} · no provider hop</small>
+        <small className="token-no-hop">{row.http?.status || row.status || "429"} · {errorSummary}</small>
       )}
     </div>
   );
@@ -924,26 +928,12 @@ function TokenPanel() {
               </div>
             </section>
           )}
-          <div id="token-rate-limit-summary" className={`quota-summary${status.multi_quota ? " quota-summary-multi" : ""}`}>
-            <div>
-              <span>Principal / model</span>
-              {status.multi_quota ? <div className="quota-summary-app-list">{status.apps.map((app: any) => <strong key={app.id}><b>{app.name}</b><small>{app.model}</small></strong>)}</div> : <strong>{status.principal || status.username || "alice/canonical-model"}</strong>}
-            </div>
-            <div>
-              <span>Limit</span>
-              {status.multi_quota ? <div className="quota-summary-app-list">{status.apps.map((app: any) => <strong key={app.id}><b>{app.name}</b><small>{app.limit} tokens</small></strong>)}</div> : <strong>{`${status.quota?.configured_limit ?? status.quota?.limit ?? status.limit ?? "—"} tokens`}</strong>}
-            </div>
-            <div>
-              <span>Remaining</span>
-              {status.multi_quota ? <div className="quota-summary-app-list">{status.apps.map((app: any) => <strong key={app.id}><b>{app.name}</b><small>{app.raw_remaining ?? app.remaining ?? "—"} tokens</small></strong>)}</div> : <strong>{`${status.quota?.remaining ?? status.remaining ?? rows[0]?.quota?.remaining ?? "—"} tokens`}</strong>}
-            </div>
-            <div>
-              <span>Backend</span>
-              <strong>
-                {status.quota?.backend || status.backend || "shared Valkey"}
-              </strong>
-            </div>
-          </div>
+          {!status.multi_quota && <div id="token-rate-limit-summary" className="quota-summary">
+            <div><span>Principal / model</span><strong>{status.principal || status.username || "alice/canonical-model"}</strong></div>
+            <div><span>Limit</span><strong>{`${status.quota?.configured_limit ?? status.quota?.limit ?? status.limit ?? "—"} tokens`}</strong></div>
+            <div><span>Remaining</span><strong>{`${status.quota?.remaining ?? status.remaining ?? rows[0]?.quota?.remaining ?? "—"} tokens`}</strong></div>
+            <div><span>Backend</span><strong>{status.quota?.backend || status.backend || "shared Valkey"}</strong></div>
+          </div>}
           <div className="table-wrap">
             <table className="request-table token-request-table">
               <thead>
