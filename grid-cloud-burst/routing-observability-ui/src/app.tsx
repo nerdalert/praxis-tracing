@@ -730,7 +730,8 @@ function RequestDetail({
 function TokenPanel() {
   const [status, setStatus] = useState<any>(null);
   const [rows, setRows] = useState<any[]>([]);
-  const [busy, setBusy] = useState(false);
+  const [busyRequests, setBusyRequests] = useState<Record<string, boolean>>({});
+  const [requestError, setRequestError] = useState<string | null>(null);
   const [fixtureState, setFixtureState] = useState("recovered");
   const [charges, setCharges] = useState<Record<string, number>>({});
   const [tokenRequestPage, setTokenRequestPage] = useState(1);
@@ -761,27 +762,41 @@ function TokenPanel() {
   }, [refresh]);
   const live = status?.source === "live" || status?.mode === "live";
   const request = async (consumer: "a" | "b", app?: string) => {
+    const requestKey = `${app || "default"}:${consumer}`;
     const requestId = `ui-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     const started = performance.now();
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 15000);
     console.info("[token-request] start", { requestId, consumer, app: app || null });
-    setBusy(true);
+    setRequestError(null);
+    setBusyRequests((current) => ({ ...current, [requestKey]: true }));
     try {
-      const result = await api.tokenRequest(consumer, app, app ? charges[app] || 5 : undefined, requestId);
+      const result = await api.tokenRequest(consumer, app, app ? charges[app] || 5 : undefined, requestId, controller.signal);
       console.info("[token-request] response", { requestId, elapsedMs: Math.round(performance.now() - started) });
+      const record = (result as any).record || null;
+      if (record) {
+        setRows((current) => [record, ...current.filter((row) => row.request_id !== record.request_id)]);
+        setTokenRequestPage(1);
+      }
       window.dispatchEvent(
         new CustomEvent("token-rate-limit-updated", {
-          detail: (result as any).record || null,
+          detail: record,
         }),
       );
     } catch (error) {
-      console.error("[token-request] error", { requestId, elapsedMs: Math.round(performance.now() - started), error: error instanceof Error ? error.message : String(error) });
-      throw error;
+      const timedOut = error instanceof DOMException && error.name === "AbortError";
+      const message = timedOut
+        ? `${consumer === "a" ? "East" : "West"} Consumer Gateway did not respond within 15 seconds.`
+        : error instanceof Error ? error.message : String(error);
+      setRequestError(message);
+      console.error("[token-request] error", { requestId, elapsedMs: Math.round(performance.now() - started), error: message });
     } finally {
-      // Re-enable the consumer buttons as soon as the request itself settles.
-      // The table refresh runs afterward without gating the buttons, so a slow
-      // refresh or background poll contention (e.g. during an overlay change)
-      // can no longer leave the gateway buttons unselectable.
-      setBusy(false);
+      window.clearTimeout(timeout);
+      setBusyRequests((current) => {
+        const next = { ...current };
+        delete next[requestKey];
+        return next;
+      });
       void refresh().then(() => console.info("[token-request] refresh-complete", { requestId, elapsedMs: Math.round(performance.now() - started) }));
       console.info("[token-request] finished", { requestId, elapsedMs: Math.round(performance.now() - started) });
     }
@@ -888,7 +903,7 @@ function TokenPanel() {
             {!status.multi_quota && <button
               id="token-request-a"
               className="primary-button"
-              disabled={busy}
+              disabled={Boolean(busyRequests["default:a"])}
               onClick={() => request("a")}
             >
               Request through Consumer A
@@ -896,7 +911,7 @@ function TokenPanel() {
             {!status.multi_quota && <button
               id="token-request-b"
               className="primary-button"
-              disabled={busy}
+              disabled={Boolean(busyRequests["default:b"])}
               onClick={() => request("b")}
             >
               Request through Consumer B
@@ -904,12 +919,13 @@ function TokenPanel() {
             <button
               id="token-clear-results"
               className="secondary-button"
-              disabled={busy || !rows.length}
+              disabled={Object.keys(busyRequests).length > 0 || !rows.length}
               onClick={clear}
             >
               Clear results
             </button>
           </div>
+          {requestError && <div className="status-message error" role="alert">{requestError}</div>}
           {status?.cloud_burst && <CloudBurstPanel />}
           {status.multi_quota && Array.isArray(status.apps) && (
             <section className="multi-quota-apps" aria-label="Independent application quotas">
@@ -925,7 +941,7 @@ function TokenPanel() {
                       {app.governance === "over_allocation" ? "SERVED · over soft cap · no 429" : app.governance === "approaching" ? "Approaching soft cap" : "Within soft cap"}
                     </div>
                     <label className="multi-quota-slider">Output cap <input type="range" min="1" max="12" value={charge} onChange={(event) => setCharges((current) => ({ ...current, [app.id]: Number(event.target.value) }))} /><output>{charge} output tokens · fixed reservation {app.estimate_tokens || 5} tokens</output></label>
-                    <div className="multi-quota-actions"><button className="primary-button" disabled={busy} onClick={() => request("a", app.id)}>{status.consumers?.[0] || "East Consumer Gateway"}</button><button className="primary-button" disabled={busy} onClick={() => request("b", app.id)}>{status.consumers?.[1] || "West Consumer Gateway"}</button></div>
+                    <div className="multi-quota-actions"><button className="primary-button" disabled={Boolean(busyRequests[`${app.id}:a`])} onClick={() => request("a", app.id)}>{busyRequests[`${app.id}:a`] ? "Sending..." : status.consumers?.[0] || "East Consumer Gateway"}</button><button className="primary-button" disabled={Boolean(busyRequests[`${app.id}:b`])} onClick={() => request("b", app.id)}>{busyRequests[`${app.id}:b`] ? "Sending..." : status.consumers?.[1] || "West Consumer Gateway"}</button></div>
                   </article>;
                 })}
               </div>

@@ -38,9 +38,10 @@ export const api = {
       `/api/v1/token-rate-limit${state ? `?state=${encodeURIComponent(state)}` : ""}`,
     ),
   cloudBurst: () => get<Record<string, unknown>>("/api/v1/cloud-burst"),
-  tokenRequest: (consumer: "a" | "b", app?: string, tokens?: number, requestId?: string) =>
+  tokenRequest: (consumer: "a" | "b", app?: string, tokens?: number, requestId?: string, signal?: AbortSignal) =>
     fetch("/api/v1/token-rate-limit/requests", {
       method: "POST",
+      signal,
       headers: {
         "Content-Type": "application/json",
         ...(requestId ? { "X-UI-Request-ID": requestId } : {}),
