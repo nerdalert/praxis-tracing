@@ -768,8 +768,6 @@ function TokenPanel() {
     try {
       const result = await api.tokenRequest(consumer, app, app ? charges[app] || 5 : undefined, requestId);
       console.info("[token-request] response", { requestId, elapsedMs: Math.round(performance.now() - started) });
-      await refresh();
-      console.info("[token-request] refresh-complete", { requestId, elapsedMs: Math.round(performance.now() - started) });
       window.dispatchEvent(
         new CustomEvent("token-rate-limit-updated", {
           detail: (result as any).record || null,
@@ -779,8 +777,13 @@ function TokenPanel() {
       console.error("[token-request] error", { requestId, elapsedMs: Math.round(performance.now() - started), error: error instanceof Error ? error.message : String(error) });
       throw error;
     } finally {
-      console.info("[token-request] finished", { requestId, elapsedMs: Math.round(performance.now() - started) });
+      // Re-enable the consumer buttons as soon as the request itself settles.
+      // The table refresh runs afterward without gating the buttons, so a slow
+      // refresh or background poll contention (e.g. during an overlay change)
+      // can no longer leave the gateway buttons unselectable.
       setBusy(false);
+      void refresh().then(() => console.info("[token-request] refresh-complete", { requestId, elapsedMs: Math.round(performance.now() - started) }));
+      console.info("[token-request] finished", { requestId, elapsedMs: Math.round(performance.now() - started) });
     }
   };
   const clear = async () => {

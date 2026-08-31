@@ -3142,7 +3142,10 @@ async function readCloudBurstCost() {
       timeline: [...buckets.values()].slice(-60),
       limitations: withUsage.length ? [] : ['The available routing evidence does not expose separate input/output token counts yet. Spend and savings are withheld until token-type usage is observed.'],
     };
-    cbCostCache = { expires: Date.now() + 2000, value, pending: null };
+    // Cache longer than the UI's 3s poll interval so each poll is served from
+    // cache instead of triggering a fresh ~3s Jaeger query and holding a
+    // browser connection open, which contended with the token request/refresh.
+    cbCostCache = { expires: Date.now() + 5000, value, pending: null };
     return value;
   })().finally(() => { cbCostCache.pending = null; });
   return cbCostCache.pending;
@@ -3420,7 +3423,12 @@ function recordCloudBurstTraffic(record) {
     session: record.session_id || null,
   });
   if (cloudBurstTrafficHistory.length > 1000) cloudBurstTrafficHistory.shift();
-  cbCostCache = { expires: 0, value: null, pending: null };
+  // Mark the cost cache stale so the panel reflects this request, but preserve
+  // any in-flight single-flight promise (do NOT null `pending`). Nulling it let
+  // each admitted request start another concurrent ~3s Jaeger-backed cost
+  // computation, so rapid clicking produced overlapping fetches; keeping the
+  // single-flight guard limits it to one recompute at a time.
+  cbCostCache.expires = 0;
   return cloud;
 }
 
