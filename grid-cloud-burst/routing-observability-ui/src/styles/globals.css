@@ -1367,6 +1367,9 @@ body.theme-dark .cb-mode select { background: #1b1d20; color: #e6e6e6; border-co
 .cb-provider-slider output { font-family: "IBM Plex Mono", monospace; color: var(--muted, #666); }
 .cb-provider-slider input[type="range"] { width: 100%; accent-color: #1f9d55; }
 .cb-provider-slider small { color: var(--muted, #666); }
+.cb-provider-slider-actions { display: flex; gap: 6px; }
+.cb-provider-slider-actions .primary-button { padding: 5px 12px; }
+.cb-provider-slider-actions button:disabled { opacity: 0.5; cursor: default; }
 .cb-traffic-controls, .cb-scenario-controls, .cb-weight-controls { display: flex; align-items: end; flex-wrap: wrap; gap: 9px; margin-top: 12px; font-size: 11px; }
 .cb-traffic-controls label, .cb-scenario-controls label, .cb-weight-controls label { display: grid; gap: 4px; color: var(--muted, #666); }
 .cb-traffic-controls input, .cb-traffic-controls select, .cb-scenario-controls select, .cb-weight-controls input { min-width: 70px; padding: 6px 7px; border: 1px solid var(--border, #aaa); border-radius: 5px; background: var(--card, #fff); color: var(--foreground, #111); }

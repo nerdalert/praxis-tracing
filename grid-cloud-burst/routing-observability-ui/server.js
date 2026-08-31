@@ -3444,10 +3444,12 @@ app.post('/api/v1/cloud-burst/metric', async (req, res) => {
     if (req.body?.reset === true) await cbResetMetrics();
     else {
       const provider = cbProvider(req.body?.provider);
-      if (!provider) return res.status(400).json({ error: 'provider must be a, b, or c' });
+      if (!provider) return res.status(400).json({ error: 'provider must be a configured local provider' });
       await cbRunMetric(provider, cbQueueValue(req.body?.value, req.body?.preset));
     }
-    await cbReconcile();
+    // Queue metrics are observed by Grid's normal polling/reconciliation loop;
+    // the UI must not force a GridNetwork reconcile here (a forced re-render can
+    // race the live metric change and is unnecessary for pressure updates).
     cloudBurstControlState.last_action = { type: 'metric', at: new Date().toISOString() };
     res.json({ ok: true, controls: cloudBurstControlState });
   } catch (error) { res.status(503).json({ error: error.message }); }
@@ -3696,7 +3698,7 @@ app.get('/api/v1/cloud-burst', async (_req, res) => {
         && cloudBurstTrafficHistory.some(item => item.cloud && Date.parse(item.at) >= Date.now() - 60_000),
       overlay_revision: overlayRevision, groups,
       controls: {
-        providers: CB_LOCAL_PROVIDER_KEYS.map((key, index) => ({ key, name: CB_LOCAL_PROVIDER_NAMES[index], simulator: CB_SIM_PROVIDER_NAMES[index] })),
+        providers: providerInventory(CB_LOCAL_PROVIDER_KEYS, CB_LOCAL_PROVIDER_NAMES, CB_SIM_PROVIDER_NAMES),
         metrics: cloudBurstControlState.metrics,
         health: cloudBurstControlState.health,
         disabled: cloudBurstControlState.disabled,

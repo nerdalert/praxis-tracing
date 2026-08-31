@@ -22,7 +22,7 @@ RUN apk add --no-cache kubectl
 COPY --from=frontend /app/package.json /app/package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
-COPY server.js overlay.json ./
+COPY server.js cloud-burst-metrics.js overlay.json ./
 COPY --from=frontend /app/dist ./dist
 COPY public ./public
 COPY scripts ./scripts

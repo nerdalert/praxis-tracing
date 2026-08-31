@@ -47,12 +47,30 @@ export default function CloudBurstPanel() {
   const [allocationLimit, setAllocationLimit] = useState(10000);
   const [tourIndex, setTourIndex] = useState(0);
   const timer = useRef<number | null>(null);
+  // The slider is a draft control: moving it only stages a value; nothing is
+  // written until the operator clicks Set. `sliderDraft` holds the staged value
+  // per provider (in steps of 5).
+  const [sliderDraft, setSliderDraft] = useState<Record<string, number>>({});
+  // Optimistic per-provider queue depth applied on Set. While a provider has an
+  // in-flight write its readout follows the operator's intent instead of the 3s
+  // poll, so a change cannot be reverted by a stale poll. Cleared once the
+  // latest write for that provider settles.
+  const [localMetrics, setLocalMetrics] = useState<Record<string, number>>({});
+  const [metricBusy, setMetricBusy] = useState<Record<string, boolean>>({});
+  const metricSeq = useRef<Map<string, number>>(new Map());
+  const metricPending = useRef<Set<string>>(new Set());
 
   const poll = useCallback(async () => {
     try {
       const r = await fetch("/api/v1/cloud-burst");
       const j = (await r.json()) as CBStatus;
       setS(j);
+      // Never let a poll overwrite a provider the operator is still adjusting.
+      setLocalMetrics((current) => {
+        const next: Record<string, number> = {};
+        for (const key of Object.keys(current)) if (metricPending.current.has(key)) next[key] = current[key];
+        return next;
+      });
       setMode((m) => m ?? j.default_mode ?? "sim");
       if (j.enabled) {
         const costResponse = await fetch("/api/v1/cloud-burst/cost");
@@ -107,7 +125,46 @@ export default function CloudBurstPanel() {
     finally { setBusy(false); }
   };
 
-  const setMetric = (provider: string, value: number) => control("metric", { provider, value });
+  // Apply one provider's staged queue depth. Only invoked by the Set button, so
+  // nothing is written while the slider moves. A monotonic per-provider
+  // sequence makes the latest request authoritative: an older in-flight write
+  // that resolves late is ignored and can never overwrite a newer value
+  // (requirement 10). A failed runtime write surfaces an error and drops the
+  // optimistic value so the UI does not falsely display a depth the simulator
+  // never accepted. The panel is never globally disabled, so live traffic and
+  // other controls keep working while pressure changes (requirement 8).
+  const applyMetric = useCallback(async (provider: string, value: number) => {
+    const seq = (metricSeq.current.get(provider) || 0) + 1;
+    metricSeq.current.set(provider, seq);
+    metricPending.current.add(provider);
+    setControlError(null);
+    setMetricBusy((current) => ({ ...current, [provider]: true }));
+    setLocalMetrics((current) => ({ ...current, [provider]: value })); // optimistic
+    const settle = (mutate: (next: Record<string, number>) => void) => {
+      if (metricSeq.current.get(provider) !== seq) return false; // superseded
+      metricPending.current.delete(provider);
+      setMetricBusy((current) => ({ ...current, [provider]: false }));
+      setLocalMetrics((current) => { const next = { ...current }; mutate(next); return next; });
+      setSliderDraft((current) => { const next = { ...current }; delete next[provider]; return next; });
+      return true;
+    };
+    try {
+      const response = await fetch("/api/v1/cloud-burst/metric", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider, value }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.ok === false) throw new Error(data.error || `control returned ${response.status}`);
+      if (settle((next) => { delete next[provider]; })) await poll();
+    } catch (error) {
+      // Drop the optimistic value so a failed write never shows a false depth.
+      if (settle((next) => { delete next[provider]; })) {
+        setControlError(error instanceof Error ? error.message : "metric control unavailable");
+        await poll();
+      }
+    }
+  }, [poll]);
+
   const resetMetrics = () => control("metric", { reset: true });
   const stopAllPressure = async () => {
     setBusy(true); setControlError(null);
@@ -252,13 +309,23 @@ export default function CloudBurstPanel() {
         <div className="cb-section-heading"><div><span className="eyebrow">Interactive operator controls</span><strong>{isGpu ? "Create sustained pressure and observe the accepted overlay" : "Set queue metrics and observe the accepted overlay"}</strong></div>{!isGpu && <button className="secondary-button" disabled={busy} onClick={resetMetrics}>Reset metrics</button>}</div>
         {isGpu ? <p className="cb-control-note">Real GPU mode uses sustained requests and observed vLLM queue metrics. Static metric sliders are disabled for this backend.</p> : <div className="cb-provider-controls">
           {localProviders.map(({ key: provider, name }) => {
-            const value = s.controls?.metrics?.[provider] ?? 0;
+            // The applied depth reflects the optimistic value while a write is
+            // pending, otherwise the live server value.
+            const applied = localMetrics[provider] ?? s.controls?.metrics?.[provider] ?? 0;
+            // The slider shows the staged draft (or the applied value until the
+            // operator moves it). Nothing is written until Set is clicked.
+            const draft = sliderDraft[provider] ?? applied;
+            const dirty = draft !== applied;
+            const pending = Boolean(metricBusy[provider]);
             const health = s.controls?.health?.[provider] || "healthy";
             return <label className="cb-provider-slider" key={provider}>
-              <span><strong>{name}</strong><output>{value} waiting</output></span>
-              <input aria-label={`Provider ${provider.toUpperCase()} queue metric`} type="range" min="0" max="20" value={value} disabled={busy} onChange={(event) => setMetric(provider, Number(event.target.value))} />
-              <small>{health} · enter above 8.5 / 10</small>
-              <button className="secondary-button" disabled={busy} onClick={() => setHealth(provider, health === "healthy" ? "unhealthy" : "healthy")}>{health === "healthy" ? "Mark unhealthy" : "Restore healthy"}</button>
+              <span><strong>{name}</strong><output>{draft} waiting{dirty ? ` (applied ${applied})` : ""}</output></span>
+              <input aria-label={`Provider ${provider.toUpperCase()} queue metric`} type="range" min="0" max="10" step="5" value={draft} onChange={(event) => setSliderDraft((current) => ({ ...current, [provider]: Number(event.target.value) }))} />
+              <small>{pending ? "setting…" : health} · enter above 8.5 / 10</small>
+              <div className="cb-provider-slider-actions">
+                <button className="primary-button" disabled={pending || !dirty} onClick={() => applyMetric(provider, draft)}>{pending ? "Setting…" : "Set"}</button>
+                <button className="secondary-button" disabled={busy} onClick={() => setHealth(provider, health === "healthy" ? "unhealthy" : "healthy")}>{health === "healthy" ? "Mark unhealthy" : "Restore healthy"}</button>
+              </div>
             </label>;
           })}
         </div>}
