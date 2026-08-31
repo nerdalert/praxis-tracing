@@ -7,6 +7,14 @@ import http from 'http';
 import https from 'https';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import {
+  normalizeQueueDepth,
+  providerInventory,
+  runMetric as cbRunMetricCore,
+  runMetrics as cbRunMetricsCore,
+  resetMetrics as cbResetMetricsCore,
+  stopAllPressure as cbStopAllPressureCore,
+} from './cloud-burst-metrics.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -223,6 +231,12 @@ const replayJobs = new Map();
 const tokenRateLimitHistory = [];
 let tokenRateLimitSequence = 0;
 
+function tokenRequestLog(event, fields = {}) {
+  console.info(JSON.stringify({
+    component: 'token-request', event, timestamp: new Date().toISOString(), ...fields,
+  }));
+}
+
 // This is the stable adapter contract for the future live OTel/HTTP source.
 // UI code consumes these normalized fields and does not depend on exporter-
 // specific attribute names.
@@ -230,7 +244,7 @@ const TOKEN_RATE_LIMIT_CONTRACT = {
   version: 'token-rate-limit.v1',
   request: ['principal', 'model', 'consumer_gateway', 'admission', 'quota', 'route', 'http', 'trace'],
   quota: ['backend', 'limit', 'used', 'remaining', 'reset_at', 'retry_after_seconds'],
-  route: ['provider_gateway', 'inference_provider', 'overlay_revision', 'hops'],
+  route: ['provider_gateway', 'overlay_revision', 'hops'],
   trace: ['trace_id', 'jaeger_url', 'spans'],
 };
 
@@ -246,8 +260,10 @@ function parseOptionalInteger(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function tokenRateLimitRequest(consumer, appConfig = null, sessionId = null) {
+function tokenRateLimitRequest(consumer, appConfig = null, sessionId = null, requestId = 'unassigned') {
   return new Promise((resolve, reject) => {
+    const started = process.hrtime.bigint();
+    const elapsedMs = () => Math.round(Number(process.hrtime.bigint() - started) / 1e6);
     const target = new URL(TOKEN_RATE_LIMIT_CONSUMERS[consumer]);
     const client = target.protocol === 'https:' ? https : http;
     const maxTokens = Number.isInteger(appConfig?.maxTokens) ? appConfig.maxTokens : TOKEN_RATE_LIMIT_MAX_TOKENS;
@@ -274,6 +290,7 @@ function tokenRateLimitRequest(consumer, appConfig = null, sessionId = null) {
         ...(sessionId ? { 'X-Session-Id': sessionId } : {}),
       },
     }, response => {
+      tokenRequestLog('response-headers', { request_id: requestId, consumer, status: response.statusCode || 0, elapsed_ms: elapsedMs() });
       let responseBody = '';
       response.on('data', chunk => { responseBody += chunk; });
       response.on('end', () => {
@@ -290,27 +307,33 @@ function tokenRateLimitRequest(consumer, appConfig = null, sessionId = null) {
         }
         let responseModel = null;
         try { responseModel = JSON.parse(responseBody)?.model || null; } catch { /* non-inference response */ }
+        tokenRequestLog('response-complete', { request_id: requestId, consumer, status: response.statusCode || 0, elapsed_ms: elapsedMs() });
         resolve({ response, actualTokens, inputTokens, outputTokens, requestedTokens, responseModel, responseBody });
       });
     });
-    request.on('error', reject);
-    request.on('timeout', () => request.destroy(new Error('token-rate-limit request timed out')));
+    request.on('error', error => {
+      tokenRequestLog('request-error', { request_id: requestId, consumer, elapsed_ms: elapsedMs(), error: error.message });
+      reject(error);
+    });
+    request.on('timeout', () => {
+      tokenRequestLog('request-timeout', { request_id: requestId, consumer, elapsed_ms: elapsedMs(), timeout_ms: 30000 });
+      request.destroy(new Error('token-rate-limit request timed out'));
+    });
+    tokenRequestLog('request-start', { request_id: requestId, consumer, target_host: target.hostname });
     request.end(payload);
   });
 }
 
 async function createTokenRateLimitRecord(consumer, appConfig = null, options = {}) {
   const startedAt = new Date().toISOString();
-  const { response, actualTokens, inputTokens, outputTokens, requestedTokens, responseModel } = await tokenRateLimitRequest(consumer, appConfig, options.session_id || null);
+  const { response, actualTokens, inputTokens, outputTokens, requestedTokens, responseModel } = await tokenRateLimitRequest(consumer, appConfig, options.session_id || null, options.request_id);
   tokenRateLimitSequence += 1;
   const status = response.statusCode || 0;
   const provider = response.headers['x-ai-demo-provider-gateway']
     || response.headers['x-grid-combined-provider-gateway']
     || response.headers['x-grid-llmd-provider-gateway']
     || null;
-  const inferenceProvider = response.headers['x-ai-inference-provider']
-    || response.headers['x-ai-demo-inference-provider']
-    || null;
+  const inferenceProvider = response.headers['x-ai-inference-provider'] || null;
   const limit = parseOptionalInteger(rateLimitHeader(response.headers, 'x-ratelimit-limit'));
   const remaining = parseOptionalInteger(rateLimitHeader(response.headers, 'x-ratelimit-remaining'));
   const resetSeconds = parseOptionalInteger(rateLimitHeader(response.headers, 'x-ratelimit-reset'));
@@ -318,12 +341,27 @@ async function createTokenRateLimitRecord(consumer, appConfig = null, options = 
   const governance = typeof response.headers['x-ratelimit-governance'] === 'string'
     ? response.headers['x-ratelimit-governance'] : null;
   const admitted = status >= 200 && status < 300;
-  const unavailable = status === 503;
-  const quotaDenied = status === 429 || status === 529;
-  const externalProvider = Boolean(response.headers['x-openai-proxy-wasm']);
+  const providerAttributed = Boolean(provider || inferenceProvider);
+  const unavailable = status === 503 && !providerAttributed;
+  const quotaDenied = (status === 429 || status === 529) && !providerAttributed;
+  const providerRateLimited = (status === 429 || status === 529) && providerAttributed;
+  const providerIdentity = `${provider || ''} ${inferenceProvider || ''}`.toLowerCase();
+  const azureProvider = providerIdentity.includes('azure');
+  const openAiProvider = Boolean(response.headers['x-openai-proxy-wasm'])
+    || providerIdentity.includes('openai') || providerIdentity.includes('api.openai.com');
+  const externalProvider = azureProvider || openAiProvider;
   const gatewayLabel = provider
     ? `${String(provider).replace(/\b\w/g, letter => letter.toUpperCase())} provider gateway`
     : 'OpenAI provider gateway';
+  const consumerLabel = TOKEN_RATE_LIMIT_CONSUMER_LABELS[consumer] || `Consumer Gateway ${consumer.toUpperCase()}`;
+  const attributedHops = providerAttributed
+    ? [
+      'client', consumerLabel, 'quota-admitted', gatewayLabel,
+      ...(azureProvider ? ['Azure route', inferenceProvider || provider]
+        : openAiProvider ? ['OpenAI route', inferenceProvider || 'api.openai.com']
+          : [inferenceProvider || provider]),
+    ]
+    : null;
   const reservationEstimate = appConfig?.estimateTokens || 5;
   const settlementAdjustment = actualTokens === null ? null : reservationEstimate - actualTokens;
   const record = {
@@ -354,7 +392,6 @@ async function createTokenRateLimitRecord(consumer, appConfig = null, options = 
     },
     requested_tokens: requestedTokens,
     response_model: responseModel,
-    inference_provider: inferenceProvider,
     external_provider: externalProvider,
     input_tokens: inputTokens,
     output_tokens: outputTokens,
@@ -363,31 +400,19 @@ async function createTokenRateLimitRecord(consumer, appConfig = null, options = 
       provider_gateway: provider,
       inference_provider: inferenceProvider,
       overlay_revision: response.headers['x-grid-overlay-revision'] || null,
-      hops: admitted && provider
-        ? externalProvider
-          ? ['client', TOKEN_RATE_LIMIT_CONSUMER_LABELS[consumer] || `Consumer Gateway ${consumer.toUpperCase()}`, 'quota-admitted', gatewayLabel, inferenceProvider || 'OpenAI route', 'api.openai.com']
-          : ['client', TOKEN_RATE_LIMIT_CONSUMER_LABELS[consumer] || `Consumer Gateway ${consumer.toUpperCase()}`, 'quota-admitted', provider, inferenceProvider || TOKEN_RATE_LIMIT_BACKEND_LABEL]
-        : ['client', TOKEN_RATE_LIMIT_CONSUMER_LABELS[consumer] || `Consumer Gateway ${consumer.toUpperCase()}`, unavailable ? 'quota-unavailable' : quotaDenied ? 'quota-denied' : 'provider-error'],
+      hops: attributedHops
+        || ['client', consumerLabel, unavailable ? 'quota-unavailable' : quotaDenied ? 'quota-denied' : 'provider-error'],
     },
     http: { status, method: 'POST', path: '/v1/chat/completions' },
     trace: { trace_id: null, jaeger_url: null, spans: [] },
     started_at: startedAt,
     error: admitted ? null : {
-      type: unavailable ? 'quota_backend_unavailable' : quotaDenied ? 'quota_exhausted' : 'provider_upstream_error',
+      type: unavailable ? 'quota_backend_unavailable'
+        : quotaDenied ? 'quota_exhausted'
+          : providerRateLimited ? 'provider_rate_limited' : 'provider_upstream_error',
       retry_after_seconds: retryAfter,
     },
   };
-  const correlatedTrace = await correlateJaegerTrace(startedAt, inferenceProvider, provider);
-  if (correlatedTrace) {
-    record.trace = {
-      trace_id: correlatedTrace.trace_id,
-      jaeger_url: correlatedTrace.jaeger_url,
-      spans: correlatedTrace.spans,
-      span_count: correlatedTrace.span_count,
-      quality: 'exact',
-    };
-    record.trace_id = correlatedTrace.trace_id;
-  }
   tokenRateLimitHistory.push(record);
   if (tokenRateLimitHistory.length > TOKEN_RATE_LIMIT_HISTORY_LIMIT) tokenRateLimitHistory.shift();
   record.principal = appConfig?.username || TOKEN_RATE_LIMIT_USERNAME;
@@ -901,10 +926,10 @@ async function runVcrSustainedLoadJob(job, ip) {
 // Jaeger proxy helpers
 // ---------------------------------------------------------------------------
 
-function jaegerFetch(path, timeoutMs = 3000) {
+function jaegerFetch(path) {
   return new Promise((resolve, reject) => {
     const url = `${JAEGER_URL}${path}`;
-    const req = http.get(url, { timeout: timeoutMs }, (res) => {
+    const req = http.get(url, { timeout: 3000 }, (res) => {
       let data = '';
       res.on('data', chunk => { data += chunk; });
       res.on('end', () => {
@@ -916,7 +941,7 @@ function jaegerFetch(path, timeoutMs = 3000) {
       });
     });
     req.on('error', reject);
-    req.on('timeout', () => { req.destroy(new Error(`timeout after ${timeoutMs}ms`)); });
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
   });
 }
 
@@ -930,30 +955,26 @@ async function isJaegerReachable() {
 }
 
 const JAEGER_SERVICES = [
-  'grid-tracing-poc', 'consumer-gateway', 'praxis',
+  'grid-tracing-poc', 'consumer-gateway', 'praxis-ai',
   'praxis-gtm-emulator', 'praxis-east-edge', 'praxis-west-edge',
   'praxis-east-provider', 'praxis-west-provider',
 ];
 
 async function fetchLiveTraces(service, limit) {
   try {
-    // Praxis traces contain many filter spans. Keep each service query bounded
-    // so a large Jaeger response cannot make the UI appear empty on timeout.
-    const result = await jaegerFetch(`/api/traces?service=${encodeURIComponent(service)}&limit=${limit}`, 10000);
+    const result = await jaegerFetch(`/api/traces?service=${service}&limit=${limit}`);
     if (result.status !== 200 || !result.body.data) return [];
     return result.body.data.map(parseJaegerTrace).filter(Boolean);
-  } catch (error) {
-    console.warn(`[tracing] Jaeger query failed for service=${service}: ${error.message}`);
+  } catch {
     return [];
   }
 }
 
 async function fetchLiveTracesAllServices(limit) {
-  const perServiceLimit = Math.min(Math.max(limit, 20), 50);
   const allTraces = [];
   const seen = new Set();
-  const serviceResults = await Promise.all(JAEGER_SERVICES.map(svc => fetchLiveTraces(svc, perServiceLimit)));
-  for (const traces of serviceResults) {
+  for (const svc of JAEGER_SERVICES) {
+    const traces = await fetchLiveTraces(svc, limit);
     for (const t of traces) {
       if (!seen.has(t.trace_id)) {
         seen.add(t.trace_id);
@@ -963,45 +984,6 @@ async function fetchLiveTracesAllServices(limit) {
   }
   allTraces.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
   return allTraces.slice(0, limit);
-}
-
-// The token-rate-limit adapter receives gateway response headers, but the
-// gateways do not put the OTel trace ID in that response. Correlate the
-// completed request with the private Jaeger index so a live quota row can
-// still open exact spans. This is bounded and best-effort; request results
-// remain authoritative if Jaeger has not indexed the request yet.
-async function correlateJaegerTrace(startedAt, inferenceProvider, providerGateway) {
-  const targetMs = Date.parse(startedAt);
-  if (!Number.isFinite(targetMs)) return null;
-  // Jaeger indexing is asynchronous. Retry the read briefly so a successful
-  // live request does not become permanently uninspectable merely because its
-  // span arrived a few hundred milliseconds after the response.
-  for (const delayMs of [0, 250, 750, 1500]) {
-    if (delayMs) await new Promise(resolve => setTimeout(resolve, delayMs));
-    try {
-      const indexedTraces = await fetchLiveTracesAllServices(20);
-      if (!indexedTraces.length) continue;
-      const candidates = indexedTraces
-        .filter(Boolean)
-        .map(trace => {
-          const entries = trace.spans.flatMap(span => Object.entries(span.tags || {}));
-          const cluster = entries.find(([key]) => key === 'provider.backend.cluster')?.[1];
-          const gateway = entries.find(([key]) => key === 'provider.id')?.[1];
-          const distance = Math.abs(Date.parse(trace.timestamp || 0) - targetMs);
-          const providerMatch = inferenceProvider && cluster === inferenceProvider ? 0 : 1;
-          const gatewayMatch = providerGateway && gateway === providerGateway ? 0 : 1;
-          return { trace, distance, providerMatch, gatewayMatch };
-        })
-        .filter(item => item.distance <= 30_000)
-        .sort((a, b) => a.providerMatch - b.providerMatch
-          || a.gatewayMatch - b.gatewayMatch
-          || a.distance - b.distance);
-      if (candidates[0]?.trace) return candidates[0].trace;
-    } catch {
-      // Trace indexing is optional; leave the request as an honest boundary.
-    }
-  }
-  return null;
 }
 
 function parseJaegerTrace(trace) {
@@ -2255,10 +2237,21 @@ app.post('/api/v1/token-rate-limit/requests', async (req, res) => {
   }
   const appConfig = TOKEN_RATE_LIMIT_MULTI_QUOTA ? TOKEN_RATE_LIMIT_APPS.find(entry => entry.id === req.body?.app) : null;
   if (TOKEN_RATE_LIMIT_MULTI_QUOTA && !appConfig) return res.status(400).json({ error: 'app must identify one configured application' });
+  const suppliedRequestId = req.get('x-ui-request-id');
+  const requestId = suppliedRequestId && /^[a-z0-9-]{8,80}$/i.test(suppliedRequestId)
+    ? suppliedRequestId : `ui-${Date.now()}`;
+  const started = process.hrtime.bigint();
+  const elapsedMs = () => Math.round(Number(process.hrtime.bigint() - started) / 1e6);
+  tokenRequestLog('api-received', { request_id: requestId, consumer, app: appConfig?.id || null });
   try {
-    const record = await createTokenRateLimitRecord(consumer, appConfig);
+    const record = await createTokenRateLimitRecord(consumer, appConfig, { request_id: requestId });
+    // Surface this admitted request (and its real token usage) in the
+    // cloud-burst economics panel when cloud burst is enabled. No-op otherwise.
+    recordCloudBurstTraffic(record);
+    tokenRequestLog('api-complete', { request_id: requestId, consumer, status: 201, elapsed_ms: elapsedMs() });
     return res.status(201).json({ version: 'v1', source: 'live', record, data: liveTokenRateLimitData() });
   } catch (error) {
+    tokenRequestLog('api-error', { request_id: requestId, consumer, status: 502, elapsed_ms: elapsedMs(), error: error.message });
     return res.status(502).json({ error: `Consumer Gateway ${consumer.toUpperCase()} request failed: ${error.message}` });
   }
 });
@@ -2308,10 +2301,7 @@ app.get('/api/v1/requests/:requestId', async (req, res) => {
 });
 
 app.get('/api/v1/requests/:requestId/trace', async (req, res) => {
-  // Live token-rate-limit rows are kept in the quota adapter history rather
-  // than the general request dataset. Include both sources so a selected
-  // live row can resolve its correlated Jaeger trace.
-  const all = [...tokenRateLimitHistory, ...(await normalizedRequestDataset())];
+  const all = await normalizedRequestDataset();
   const request = all.find(item => item.request_id === req.params.requestId || item.trace_id === req.params.requestId);
   if (!request) return res.status(404).json({ error: 'request not found' });
   if (request.trace_id && !request.trace_id.startsWith('000000000000000000000000000000')) {
@@ -3011,10 +3001,7 @@ async function cbReadGpuMetrics() {
 
 function cbSpanNumber(request, names) {
   for (const span of request?.spans || []) {
-    const tags = Array.isArray(span.tags)
-      ? span.tags
-      : Object.entries(span.tags || {}).map(([key, value]) => ({ key, value }));
-    for (const tag of tags) {
+    for (const tag of span.tags || []) {
       if (names.includes(tag.key)) {
         const value = cbNumeric(tag.value);
         if (value !== null) return value;
@@ -3155,7 +3142,10 @@ async function readCloudBurstCost() {
       timeline: [...buckets.values()].slice(-60),
       limitations: withUsage.length ? [] : ['The available routing evidence does not expose separate input/output token counts yet. Spend and savings are withheld until token-type usage is observed.'],
     };
-    cbCostCache = { expires: Date.now() + 2000, value, pending: null };
+    // Cache longer than the UI's 3s poll interval so each poll is served from
+    // cache instead of triggering a fresh ~3s Jaeger query and holding a
+    // browser connection open, which contended with the token request/refresh.
+    cbCostCache = { expires: Date.now() + 5000, value, pending: null };
     return value;
   })().finally(() => { cbCostCache.pending = null; });
   return cbCostCache.pending;
@@ -3196,87 +3186,93 @@ async function cbReconcile() {
   await cbKubectl(['annotate', 'gridnetwork', CB_NETWORK, `grid.praxis-proxy.io/force-reconcile=${Date.now()}`, '--overwrite']);
 }
 
+async function cbSetRuntimeMetric(providerName, queue) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CB_CONTROL_TIMEOUT);
+  try {
+    const response = await fetch(
+      `http://${providerName}.grid-system.svc.cluster.local:8000/admin/config`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ 'fake-metrics': { 'waiting-requests': queue } }),
+        signal: controller.signal,
+      },
+    );
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`${providerName} metric update failed: HTTP ${response.status}${detail ? `: ${detail}` : ''}`);
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Shared effects for the extracted cloud-burst metric control. Injecting these
+// keeps the queue-slider path a single tested unit (cloud-burst-metrics.js)
+// while the endpoints below stay thin.
+function cbMetricDeps() {
+  return {
+    kubectl: cbKubectl,
+    setRuntimeMetric: cbSetRuntimeMetric,
+    simProviderName: cbSimProviderName,
+    providerKeys: CB_LOCAL_PROVIDER_KEYS,
+    controlTimeout: CB_CONTROL_TIMEOUT,
+    loadDeploy: CB_LOAD_DEPLOY,
+    state: cloudBurstControlState,
+    cancelPressureJob: () => { if (cloudBurstPressureJob) cloudBurstPressureJob.cancelled = true; },
+  };
+}
+
 async function cbRunMetric(provider, queue) {
-  const providerName = cbSimProviderName(provider);
-  if (!providerName) throw new Error(`unknown configured local provider: ${provider}`);
-  const name = `${providerName}-config`;
-  const document = JSON.parse(await cbKubectl(['get', 'configmap', name, '-o', 'json']));
-  const source = document?.data?.['config.yaml'];
-  if (typeof source !== 'string') throw new Error(`${name} config.yaml is unavailable`);
-  const updated = source.replace(/waiting-requests:\s*[^\n]*/, `waiting-requests: ${queue}`);
-  await cbKubectl([
-    'patch', 'configmap', name, '--type=merge',
-    '-p', JSON.stringify({ data: { 'config.yaml': updated } }),
-  ], CB_CONTROL_TIMEOUT);
-  await cbKubectl(['rollout', 'restart', `deploy/${providerName}`], CB_CONTROL_TIMEOUT);
-  await new Promise(resolve => setTimeout(resolve, 20000));
-  cloudBurstControlState.metrics[provider] = queue;
+  await cbRunMetricCore(cbMetricDeps(), provider, queue);
 }
 
 async function cbSetProviderDisabled(provider, disabled) {
   const providerName = cbSimProviderName(provider);
   if (!providerName) throw new Error(`unknown configured simulator: ${provider}`);
-  // Remove/restore Service endpoints through the simulator Deployment. Grid's
-  // normal health evaluation withdraws or restores the candidate; the UI does
-  // not forge an overlay or alter request-time routing.
-  await cbKubectl(['scale', `deploy/${providerName}`, `--replicas=${disabled ? 0 : 1}`], CB_CONTROL_TIMEOUT);
+  // Disabling the simulator removes its Service endpoints. Grid's normal
+  // health evaluation then withdraws the candidate; no overlay is forged by
+  // the UI and no request-path behavior is changed.
+  const replicas = disabled ? 0 : 1;
+  await cbKubectl(['scale', `deploy/${providerName}`, `--replicas=${replicas}`], CB_CONTROL_TIMEOUT);
   cloudBurstControlState.disabled[provider] = disabled;
   cloudBurstControlState.health[provider] = disabled ? 'disabled' : 'healthy';
   await cbReconcile();
 }
 
+async function cbRefreshProviderReplicaState() {
+  try {
+    const resources = CB_SIM_PROVIDER_NAMES.map(name => `deployment/${name}`);
+    const document = JSON.parse(await cbKubectl(['get', ...resources, '-o', 'json']));
+    const deployments = Array.isArray(document.items) ? document.items : [document];
+    const replicas = new Map(deployments.map(item => [
+      item?.metadata?.name,
+      Number(item?.spec?.replicas ?? 0),
+    ]));
+    CB_LOCAL_PROVIDER_KEYS.forEach((key, index) => {
+      const simulator = CB_SIM_PROVIDER_NAMES[index];
+      if (!replicas.has(simulator)) return;
+      const disabled = replicas.get(simulator) === 0;
+      cloudBurstControlState.disabled[key] = disabled;
+      if (disabled) cloudBurstControlState.health[key] = 'disabled';
+      else if (cloudBurstControlState.health[key] === 'disabled') cloudBurstControlState.health[key] = 'healthy';
+    });
+  } catch {
+    // Preserve the last observed state during a transient Kubernetes read failure.
+  }
+}
+
 async function cbRunMetrics(values) {
-  for (const [provider, queue] of Object.entries(values)) {
-    const providerName = cbSimProviderName(provider);
-    if (!providerName) continue;
-    const name = `${providerName}-config`;
-    const document = JSON.parse(await cbKubectl(['get', 'configmap', name, '-o', 'json']));
-    const source = document?.data?.['config.yaml'];
-    if (typeof source !== 'string') throw new Error(`${name} config.yaml is unavailable`);
-    const updated = source.replace(/waiting-requests:\s*[^\n]*/, `waiting-requests: ${queue}`);
-    await cbKubectl([
-      'patch', 'configmap', name, '--type=merge',
-      '-p', JSON.stringify({ data: { 'config.yaml': updated } }),
-    ], CB_CONTROL_TIMEOUT);
-  }
-  for (const provider of Object.keys(values)) {
-    const providerName = cbSimProviderName(provider);
-    if (providerName) await cbKubectl(['rollout', 'restart', `deploy/${providerName}`], CB_CONTROL_TIMEOUT);
-  }
-  await new Promise(resolve => setTimeout(resolve, 20000));
-  Object.assign(cloudBurstControlState.metrics, values);
+  await cbRunMetricsCore(cbMetricDeps(), values);
 }
 
 async function cbResetMetrics() {
-  // Keep reset in the server's in-cluster control path.  The older helper
-  // shell script assumes a host kubectl context and is not reliable from an
-  // OpenShift UI pod.  Reset every simulator independently, then restart it so
-  // the zero gauge is observable before the next Grid reconcile.
-  for (const provider of CB_LOCAL_PROVIDER_KEYS) {
-    const providerName = cbSimProviderName(provider);
-    if (!providerName) continue;
-    const name = `${providerName}-config`;
-    const document = JSON.parse(await cbKubectl(['get', 'configmap', name, '-o', 'json']));
-    const source = document?.data?.['config.yaml'];
-    if (typeof source !== 'string') throw new Error(`${name} config.yaml is unavailable`);
-    const updated = source.replace(/waiting-requests:\s*[^\n]*/, 'waiting-requests: 0');
-    await cbKubectl([
-      'patch', 'configmap', name, '--type=merge',
-      '-p', JSON.stringify({ data: { 'config.yaml': updated } }),
-    ], CB_CONTROL_TIMEOUT);
-    await cbKubectl(['rollout', 'restart', `deploy/${providerName}`], CB_CONTROL_TIMEOUT);
-  }
-  await new Promise(resolve => setTimeout(resolve, 20000));
-  cloudBurstControlState.metrics = Object.fromEntries(CB_LOCAL_PROVIDER_KEYS.map(key => [key, 0]));
+  await cbResetMetricsCore(cbMetricDeps());
 }
 
 async function cbStopAllPressure() {
-  if (cloudBurstPressureJob) cloudBurstPressureJob.cancelled = true;
-  await cbResetMetrics();
-  // A GPU pressure deployment is optional on simulator-backed installs.
-  // Absence is expected and must not make the stop control fail.
-  try { await cbKubectl(['scale', 'deploy/epp-load', '--replicas=0'], CB_CONTROL_TIMEOUT); } catch { /* optional */ }
-  await cbReconcile();
+  await cbStopAllPressureCore(cbMetricDeps());
 }
 
 function cbAllocationYaml(source, policy) {
@@ -3391,9 +3387,49 @@ function cbQueueValue(value, preset) {
     if (preset === 'saturate') return Math.max(CB_QUEUE_CAPACITY + 1, CB_QUEUE_CAPACITY * 2);
     throw new Error('preset must be calm, pressure, or saturate');
   }
-  const number = Number(value);
-  if (!Number.isFinite(number) || number < 0 || number > 1000) throw new Error('metric value must be between 0 and 1000');
-  return number <= 1 ? Math.round(number * CB_QUEUE_CAPACITY) : Math.round(number);
+  // Interactive slider values are integer queue depths (0..N waiting requests),
+  // not a 0..1 ratio of capacity. Zero must stay zero and low values must not
+  // be silently scaled up (previously value 1 became CB_QUEUE_CAPACITY).
+  return normalizeQueueDepth(value, { max: 1000 });
+}
+
+// Whether a completed request record used a cloud/overflow provider. Derived
+// from trusted response attribution (external provider) or a provider model
+// that differs from the logical model, never from a display default.
+function cbRecordIsCloud(record) {
+  return Boolean(record.external_provider)
+    || Boolean(record.response_model && record.response_model !== CB_LOGICAL_MODEL);
+}
+
+// Feed an admitted request record into the cloud-burst economics history so the
+// cost panel reflects the same traffic the operator generates from the demo.
+// Token counts are the real usage the gateway returned (OpenAI usage block for
+// cloud hits); nothing is fabricated. No-op when cloud burst is not enabled.
+function recordCloudBurstTraffic(record) {
+  if (!TOKEN_CLOUD_BURST) return null;
+  const cloud = cbRecordIsCloud(record);
+  cloudBurstTrafficHistory.push({
+    at: record.started_at,
+    request_id: record.request_id,
+    consumer: record.consumer_gateway,
+    provider: record.route?.provider_gateway,
+    cloud,
+    status: record.http?.status,
+    trace_id: record.trace?.trace_id,
+    input_tokens: record.input_tokens,
+    output_tokens: record.output_tokens,
+    total_tokens: record.quota?.actual_tokens,
+    requested_tokens: record.requested_tokens,
+    session: record.session_id || null,
+  });
+  if (cloudBurstTrafficHistory.length > 1000) cloudBurstTrafficHistory.shift();
+  // Mark the cost cache stale so the panel reflects this request, but preserve
+  // any in-flight single-flight promise (do NOT null `pending`). Nulling it let
+  // each admitted request start another concurrent ~3s Jaeger-backed cost
+  // computation, so rapid clicking produced overlapping fetches; keeping the
+  // single-flight guard limits it to one recompute at a time.
+  cbCostCache.expires = 0;
+  return cloud;
 }
 
 async function cbTrafficRecord(consumer, sessionMode, appOverride = null) {
@@ -3403,24 +3439,7 @@ async function cbTrafficRecord(consumer, sessionMode, appOverride = null) {
     : `cloud-burst-${Date.now()}-${randomUUID()}`;
   cloudBurstTrafficSequence += 1;
   const record = await createTokenRateLimitRecord(consumer, app, { session_id: sessionId });
-  const cloud = Boolean(record.external_provider)
-    || Boolean(record.response_model && record.response_model !== CB_LOGICAL_MODEL);
-  const item = {
-    at: record.started_at,
-    request_id: record.request_id,
-    consumer: record.consumer_gateway,
-    provider: record.route.provider_gateway,
-    cloud,
-    status: record.http.status,
-    trace_id: record.trace.trace_id,
-    input_tokens: record.input_tokens,
-    output_tokens: record.output_tokens,
-    total_tokens: record.quota.actual_tokens,
-    requested_tokens: record.requested_tokens,
-    session: sessionId,
-  };
-  cloudBurstTrafficHistory.push(item);
-  if (cloudBurstTrafficHistory.length > 1000) cloudBurstTrafficHistory.shift();
+  const cloud = recordCloudBurstTraffic(record) ?? cbRecordIsCloud(record);
   return { ...record, cloud, session_id: sessionId };
 }
 
@@ -3453,10 +3472,12 @@ app.post('/api/v1/cloud-burst/metric', async (req, res) => {
     if (req.body?.reset === true) await cbResetMetrics();
     else {
       const provider = cbProvider(req.body?.provider);
-      if (!provider) return res.status(400).json({ error: 'provider must be a, b, or c' });
+      if (!provider) return res.status(400).json({ error: 'provider must be a configured local provider' });
       await cbRunMetric(provider, cbQueueValue(req.body?.value, req.body?.preset));
     }
-    await cbReconcile();
+    // Queue metrics are observed by Grid's normal polling/reconciliation loop;
+    // the UI must not force a GridNetwork reconcile here (a forced re-render can
+    // race the live metric change and is unnecessary for pressure updates).
     cloudBurstControlState.last_action = { type: 'metric', at: new Date().toISOString() };
     res.json({ ok: true, controls: cloudBurstControlState });
   } catch (error) { res.status(503).json({ error: error.message }); }
@@ -3620,6 +3641,7 @@ app.get('/api/v1/cloud-burst', async (_req, res) => {
     const raw = await cbKubectl(['get', 'configmap', CB_OVERLAY_CM, '-o',
       'jsonpath={.data.routing-overlay\\.json}']);
     const document = JSON.parse(raw);
+    await cbRefreshProviderReplicaState();
     // The Grid operator exposes the semantic overlay in routing-config.json,
     // while the Praxis validator consumes the enveloped routing-overlay.json.
     // Accept both shapes so the RHOAI UI reads the live operator ConfigMap.
@@ -3632,9 +3654,10 @@ app.get('/api/v1/cloud-burst', async (_req, res) => {
       const model = c.name || c.model || '';
       const identity = `${model} ${c.site || ''} ${c.cluster || ''}`;
       const bedrock = /bedrock/i.test(identity);
-      const openai = /openai|cloud/i.test(identity);
+      const azure = /azure/i.test(identity);
+      const openai = /openai/i.test(identity);
       const suffix = String(c.cluster || c.site || '').match(/(?:static-)?(?:openai-)?([abc])$/i)?.[1]?.toLowerCase();
-      const external = Boolean(c.credential) || c.backend_kind === 'api_provider' || openai || bedrock;
+      const external = Boolean(c.credential) || c.backend_kind === 'api_provider' || openai || azure || bedrock;
       return {
         site: c.site, cluster: c.cluster, model, group: c.selection_group ?? 0,
         admission: c.admission_state || null, tier: c.selection_tier || null,
@@ -3642,7 +3665,7 @@ app.get('/api/v1/cloud-burst', async (_req, res) => {
         // backend_kind is intentionally not used to label cloud providers:
         // both OpenAI and Bedrock are generic api_provider routes. The
         // provider identity comes from the accepted candidate name.
-        provider: bedrock ? 'bedrock' : external ? 'openai' : 'local',
+        provider: bedrock ? 'bedrock' : azure ? 'azure' : openai ? 'openai' : external ? 'external' : 'local',
         // The static resources use one provider gateway per local suffix.
         // Bedrock is the standalone overflow endpoint attached to gateway A;
         // it is still rendered as its own overflow candidate below that card.
@@ -3703,7 +3726,7 @@ app.get('/api/v1/cloud-burst', async (_req, res) => {
         && cloudBurstTrafficHistory.some(item => item.cloud && Date.parse(item.at) >= Date.now() - 60_000),
       overlay_revision: overlayRevision, groups,
       controls: {
-        providers: CB_LOCAL_PROVIDER_KEYS.map((key, index) => ({ key, name: CB_LOCAL_PROVIDER_NAMES[index], simulator: CB_SIM_PROVIDER_NAMES[index] })),
+        providers: providerInventory(CB_LOCAL_PROVIDER_KEYS, CB_LOCAL_PROVIDER_NAMES, CB_SIM_PROVIDER_NAMES),
         metrics: cloudBurstControlState.metrics,
         health: cloudBurstControlState.health,
         disabled: cloudBurstControlState.disabled,
@@ -3739,7 +3762,6 @@ app.post('/api/v1/cloud-burst/load', async (req, res) => {
       if (on) {
         const pressureQueue = cbQueueValue(undefined, 'pressure');
         await cbRunMetrics(Object.fromEntries(CB_LOCAL_PROVIDER_KEYS.map(provider => [provider, pressureQueue])));
-        await cbReconcile();
         return res.json({ ok: true, load_on: true, mode, replicas: CB_MODES[mode].replicas });
       }
       await cbStopAllPressure();

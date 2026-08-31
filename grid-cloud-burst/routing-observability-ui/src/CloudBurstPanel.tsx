@@ -38,6 +38,7 @@ export default function CloudBurstPanel() {
   const [cost, setCost] = useState<CBCost | null>(null);
   const [controlError, setControlError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [providerBusy, setProviderBusy] = useState<Record<string, boolean>>({});
   // Backend-sensitivity mode: "sim" (kind mock, deep queue) vs "gpu" (real GPU,
   // saturates fast). Drives generator load AND gauge capacity. Defaults to the
   // server's TRACING_UI_CB_MODE once the first status arrives.
@@ -46,13 +47,30 @@ export default function CloudBurstPanel() {
   const [allocationLimit, setAllocationLimit] = useState(10000);
   const [tourIndex, setTourIndex] = useState(0);
   const timer = useRef<number | null>(null);
-  const candidateCache = useRef(new Map<string, CBGroup>());
+  // The slider is a draft control: moving it only stages a value; nothing is
+  // written until the operator clicks Set. `sliderDraft` holds the staged value
+  // per provider (in steps of 5).
+  const [sliderDraft, setSliderDraft] = useState<Record<string, number>>({});
+  // Optimistic per-provider queue depth applied on Set. While a provider has an
+  // in-flight write its readout follows the operator's intent instead of the 3s
+  // poll, so a change cannot be reverted by a stale poll. Cleared once the
+  // latest write for that provider settles.
+  const [localMetrics, setLocalMetrics] = useState<Record<string, number>>({});
+  const [metricBusy, setMetricBusy] = useState<Record<string, boolean>>({});
+  const metricSeq = useRef<Map<string, number>>(new Map());
+  const metricPending = useRef<Set<string>>(new Set());
 
   const poll = useCallback(async () => {
     try {
       const r = await fetch("/api/v1/cloud-burst");
       const j = (await r.json()) as CBStatus;
       setS(j);
+      // Never let a poll overwrite a provider the operator is still adjusting.
+      setLocalMetrics((current) => {
+        const next: Record<string, number> = {};
+        for (const key of Object.keys(current)) if (metricPending.current.has(key)) next[key] = current[key];
+        return next;
+      });
       setMode((m) => m ?? j.default_mode ?? "sim");
       if (j.enabled) {
         const costResponse = await fetch("/api/v1/cloud-burst/cost");
@@ -107,7 +125,46 @@ export default function CloudBurstPanel() {
     finally { setBusy(false); }
   };
 
-  const setMetric = (provider: string, value: number) => control("metric", { provider, value });
+  // Apply one provider's staged queue depth. Only invoked by the Set button, so
+  // nothing is written while the slider moves. A monotonic per-provider
+  // sequence makes the latest request authoritative: an older in-flight write
+  // that resolves late is ignored and can never overwrite a newer value
+  // (requirement 10). A failed runtime write surfaces an error and drops the
+  // optimistic value so the UI does not falsely display a depth the simulator
+  // never accepted. The panel is never globally disabled, so live traffic and
+  // other controls keep working while pressure changes (requirement 8).
+  const applyMetric = useCallback(async (provider: string, value: number) => {
+    const seq = (metricSeq.current.get(provider) || 0) + 1;
+    metricSeq.current.set(provider, seq);
+    metricPending.current.add(provider);
+    setControlError(null);
+    setMetricBusy((current) => ({ ...current, [provider]: true }));
+    setLocalMetrics((current) => ({ ...current, [provider]: value })); // optimistic
+    const settle = (mutate: (next: Record<string, number>) => void) => {
+      if (metricSeq.current.get(provider) !== seq) return false; // superseded
+      metricPending.current.delete(provider);
+      setMetricBusy((current) => ({ ...current, [provider]: false }));
+      setLocalMetrics((current) => { const next = { ...current }; mutate(next); return next; });
+      setSliderDraft((current) => { const next = { ...current }; delete next[provider]; return next; });
+      return true;
+    };
+    try {
+      const response = await fetch("/api/v1/cloud-burst/metric", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider, value }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.ok === false) throw new Error(data.error || `control returned ${response.status}`);
+      if (settle((next) => { delete next[provider]; })) await poll();
+    } catch (error) {
+      // Drop the optimistic value so a failed write never shows a false depth.
+      if (settle((next) => { delete next[provider]; })) {
+        setControlError(error instanceof Error ? error.message : "metric control unavailable");
+        await poll();
+      }
+    }
+  }, [poll]);
+
   const resetMetrics = () => control("metric", { reset: true });
   const stopAllPressure = async () => {
     setBusy(true); setControlError(null);
@@ -122,7 +179,14 @@ export default function CloudBurstPanel() {
   const runScenario = (id: string) => control("scenario", { id });
   const publishWeights = () => control("weights", weights);
   const setHealth = (provider: string, state: string) => control("health", { provider, state });
-  const setProviderDisabled = (provider: string, disabled: boolean) => control("provider", { provider, disabled });
+  const setProviderDisabled = async (provider: string, disabled: boolean) => {
+    setProviderBusy((current) => ({ ...current, [provider]: true }));
+    try {
+      await control("provider", { provider, disabled });
+    } finally {
+      setProviderBusy((current) => ({ ...current, [provider]: false }));
+    }
+  };
   const setAllocation = (enforcement: string, limit = allocationLimit) => control("allocation", { principal: "loadgen", enforcement, limit });
 
   const tour = [
@@ -149,20 +213,11 @@ export default function CloudBurstPanel() {
   const pressureActive = Boolean(s.pressure_active ?? s.local_admission === "existing_only");
   const burst = Boolean(s.cloud_burst_active ?? s.burst_active);
   const pressureRunning = Boolean(s.load_on || pressureActive);
-  // Keep the control cards driven by the configured provider set, not only by
-  // currently eligible overlay candidates. A disabled backend is correctly
-  // withdrawn from the overlay, but its card must remain available so it can
-  // be restored without a page reload or a hardcoded provider list.
-  const localProviders = s.controls?.providers || [];
-  const localKeys = localProviders.map((provider) => provider.key);
-  const disabledProviderNames = new Set(localProviders.filter((provider) => s.controls?.disabled?.[provider.key]).map((provider) => provider.name));
-  for (const candidate of s.groups || []) candidateCache.current.set(candidate.cluster, candidate);
-  const topologyCandidates = [...(s.groups || [])];
-  for (const provider of localProviders) {
-    if (!disabledProviderNames.has(provider.name) || topologyCandidates.some((candidate) => candidate.cluster === provider.name)) continue;
-    const cached = candidateCache.current.get(provider.name);
-    if (cached) topologyCandidates.push(cached);
-  }
+  const configuredProviders = s.controls?.providers || [];
+  const overlayProviders = s.groups || [];
+  const localProviders = configuredProviders;
+  const localKeys = configuredProviders.map((provider) => provider.key);
+  const disabledProviderNames = new Set(configuredProviders.filter((provider) => s.controls?.disabled?.[provider.key]).map((provider) => provider.name));
   const isGpu = activeMode === "gpu";
   const gatewayDisplayName = (value: string) => {
     const normalized = String(value || "provider").replace(/^(qwen|openai)-/i, "").replace(/-(local|cloud)$/i, "");
@@ -172,7 +227,14 @@ export default function CloudBurstPanel() {
       .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
       .join(" ");
   };
-  const gateways = Object.values(topologyCandidates.reduce<Record<string, { id: string; site: string; candidates: CBGroup[] }>>((all, candidate) => {
+  const withdrawnProviders: CBGroup[] = configuredProviders
+    .filter((provider) => !overlayProviders.some((candidate) => candidate.cluster === provider.name))
+    .map((provider) => {
+      const locality = String(provider.name).match(/(east|west|central)/i)?.[1]?.toLowerCase() || "local";
+      return { site: `${locality}-local`, cluster: provider.name, group: null, admission: null, tier: "withdrawn", external: false, provider: "local", withdrawn: true };
+    });
+  const displayProviders = [...overlayProviders, ...withdrawnProviders];
+  const gateways = Object.values(displayProviders.reduce<Record<string, { id: string; site: string; candidates: CBGroup[] }>>((all, candidate) => {
     // The overlay has one candidate per backend route. For the symmetric
     // topology, openai-west/openai-central/openai-east share the physical
     // west/central/east provider gateway with their local vLLM candidates.
@@ -195,7 +257,10 @@ export default function CloudBurstPanel() {
   const RED = "#e11", GREEN = "#1f9d55", MUTE = "#8a8d90", AMBER = "#d98200";
   const gaugeColor = pressure >= ENTER ? RED : pressure >= 0.5 ? AMBER : GREEN;
   const money = (micros: number | null | undefined) => micros == null ? "—" : `$${(micros / 1_000_000).toFixed(6)}`;
-  const observedUsage = cost?.telemetry_quality === "token-type usage observed";
+  // Real cloud usage should render even when local usage is only estimated:
+  // the server reports "cloud usage real; local usage estimated" in that case.
+  const observedUsage = cost?.telemetry_quality === "token-type usage observed"
+    || cost?.telemetry_quality === "cloud usage real; local usage estimated";
   const totalHits = (cost?.local_hits || 0) + (cost?.cloud_hits || 0);
   const cloudShare = totalHits ? Math.round(((cost?.cloud_hits || 0) / totalHits) * 100) : 0;
 
@@ -247,13 +312,23 @@ export default function CloudBurstPanel() {
         <div className="cb-section-heading"><div><span className="eyebrow">Interactive operator controls</span><strong>{isGpu ? "Create sustained pressure and observe the accepted overlay" : "Set queue metrics and observe the accepted overlay"}</strong></div>{!isGpu && <button className="secondary-button" disabled={busy} onClick={resetMetrics}>Reset metrics</button>}</div>
         {isGpu ? <p className="cb-control-note">Real GPU mode uses sustained requests and observed vLLM queue metrics. Static metric sliders are disabled for this backend.</p> : <div className="cb-provider-controls">
           {localProviders.map(({ key: provider, name }) => {
-            const value = s.controls?.metrics?.[provider] ?? 0;
+            // The applied depth reflects the optimistic value while a write is
+            // pending, otherwise the live server value.
+            const applied = localMetrics[provider] ?? s.controls?.metrics?.[provider] ?? 0;
+            // The slider shows the staged draft (or the applied value until the
+            // operator moves it). Nothing is written until Set is clicked.
+            const draft = sliderDraft[provider] ?? applied;
+            const dirty = draft !== applied;
+            const pending = Boolean(metricBusy[provider]);
             const health = s.controls?.health?.[provider] || "healthy";
             return <label className="cb-provider-slider" key={provider}>
-              <span><strong>{name}</strong><output>{value} waiting</output></span>
-              <input aria-label={`Provider ${provider.toUpperCase()} queue metric`} type="range" min="0" max="20" value={value} disabled={busy} onChange={(event) => setMetric(provider, Number(event.target.value))} />
-              <small>{health} · enter above 8.5 / 10</small>
-              <button className="secondary-button" disabled={busy} onClick={() => setHealth(provider, health === "healthy" ? "unhealthy" : "healthy")}>{health === "healthy" ? "Mark unhealthy" : "Restore healthy"}</button>
+              <span><strong>{name}</strong><output>{draft} waiting{dirty ? ` (applied ${applied})` : ""}</output></span>
+              <input aria-label={`Provider ${provider.toUpperCase()} queue metric`} type="range" min="0" max="10" step="5" value={draft} onChange={(event) => setSliderDraft((current) => ({ ...current, [provider]: Number(event.target.value) }))} />
+              <small>{pending ? "setting…" : health} · enter above 8.5 / 10</small>
+              <div className="cb-provider-slider-actions">
+                <button className="primary-button" disabled={pending || !dirty} onClick={() => applyMetric(provider, draft)}>{pending ? "Setting…" : "Set"}</button>
+                <button className="secondary-button" disabled={busy} onClick={() => setHealth(provider, health === "healthy" ? "unhealthy" : "healthy")}>{health === "healthy" ? "Mark unhealthy" : "Restore healthy"}</button>
+              </div>
             </label>;
           })}
         </div>}
@@ -295,7 +370,7 @@ export default function CloudBurstPanel() {
             const health = s.controls?.health?.[key] || "healthy";
             return <div className={`cb-disable-card ${disabled || health === "unhealthy" ? "cb-disable-card-off" : ""}`} key={key}>
               <div><strong>{name}</strong><small>{simulator} · {disabled ? "disabled" : health}</small></div>
-              <button className="secondary-button" disabled={busy} onClick={() => setProviderDisabled(key, !disabled)}>{disabled ? "Enable vLLM" : "Disable vLLM"}</button>
+              <button className="secondary-button" disabled={Boolean(providerBusy[key])} onClick={() => setProviderDisabled(key, !disabled)}>{providerBusy[key] ? "Updating…" : disabled ? "Restore vLLM" : "Disable vLLM"}</button>
             </div>;
           })}
         </div>
@@ -338,21 +413,25 @@ export default function CloudBurstPanel() {
                   <Edge x1={330} y1={aY + 28} x2={480} y2={gwY + 28} color={gwColor} />
                   <Edge x1={330} y1={bY + 28} x2={480} y2={gwY + 28} color={gwColor} />
                   <Node x={480} y={gwY} w={190} label={`${gatewayDisplayName(gateway.site)} provider gateway`}
-                    sub={`${gateway.candidates.map((c) => `g${c.group}`).join(" / ")} · ${gatewayActive ? (eligible ? "accepting new" : "active") : "not accepting connections"}`}
+                    sub={`${gateway.candidates.map((c) => c.group == null ? "withdrawn" : `g${c.group}`).join(" / ")} · ${gatewayActive ? (eligible ? "accepting new" : "active") : "not accepting connections"}`}
                     tone={gwTone} />
                   {children.map(({ candidate, y }) => {
                     const candidateDisabled = !candidate.external && disabledProviderNames.has(candidate.cluster);
+                    const candidateWithdrawn = Boolean(candidate.withdrawn);
                     const candidateActive = !candidateDisabled && candidate.admission === "new_and_existing" && candidate.fresh !== false;
                     const candidatePressure = !candidateDisabled && candidate.admission === "existing_only";
                     const edgeColor = candidateDisabled ? RED : candidateActive ? GREEN : candidatePressure ? AMBER : RED;
                     const nodeTone = candidateDisabled || (!candidateActive && !candidatePressure) ? "unavailable" : candidatePressure ? "pressure" : "active";
                     const detail = candidate.external ? "overflow" : (candidate.tier === "same_site" ? "local" : String(candidate.tier || "").replace(/_/g, " "));
+                    const providerLabel = String(candidate.provider || "external")
+                      .replace(/[_-]+/g, " ")
+                      .replace(/\b\w/g, (letter) => letter.toUpperCase());
                     return (
                       <React.Fragment key={`${gateway.id}-${candidate.cluster}`}>
-                        <Edge x1={670} y1={gwY + 28} x2={800} y2={y + 28} color={edgeColor} dashed={candidateDisabled} />
+                        <Edge x1={670} y1={gwY + 28} x2={800} y2={y + 28} color={edgeColor} dashed={candidateDisabled || candidateWithdrawn} />
                         <Node x={800} y={y} w={280}
-                          label={candidate.external ? `${candidate.provider === "bedrock" ? "Bedrock" : "OpenAI"} route` : "vLLM backend"}
-                          sub={`${candidate.cluster} · g${candidate.group} · ${candidateDisabled ? "endpoint unavailable" : candidateActive ? "accepting new" : candidatePressure ? "pressure · existing only" : "not accepting connections"} · ${detail}`}
+                          label={candidate.external ? `${providerLabel} route` : "vLLM backend"}
+                          sub={`${candidate.cluster} · ${candidate.group == null ? "withdrawn" : `g${candidate.group}`} · ${candidateDisabled ? "endpoint unavailable" : candidateWithdrawn ? "recovering · awaiting overlay" : candidateActive ? "accepting new" : candidatePressure ? "pressure · existing only" : "not accepting connections"} · ${detail}`}
                           tone={nodeTone} />
                       </React.Fragment>
                     );

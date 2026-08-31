@@ -116,7 +116,6 @@ function displayHopLabel(label: string, tokenProfile = false): string {
     const match = label.toLowerCase().match(/^(?:vcr-)?(east|central|west)(?:-provider)?$/);
     if (match) return `vLLM ${match[1]} provider`;
   }
-  if (/^llm-d-[a-z0-9-]+$/i.test(label)) return label;
   return label === "vllm-vcr" ? "vLLM" : String(label).replaceAll("-", " ");
 }
 
@@ -131,6 +130,10 @@ function TokenPath({ row }: { row: any }) {
           ? "quota unavailable"
           : "quota denied",
       ];
+  const providerAttributed = Boolean(row.route?.provider_gateway || row.route?.inference_provider);
+  const errorSummary = row.error?.type === "provider_rate_limited"
+    ? "provider rate limited"
+    : providerAttributed ? "provider error" : "no provider hop";
   return (
     <div
       className={`token-path ${row.admission === "admitted" ? "admitted" : "stopped"}`}
@@ -155,7 +158,7 @@ function TokenPath({ row }: { row: any }) {
         </Fragment>
       ))}
       {row.admission !== "admitted" && (
-        <small className="token-no-hop">{row.http?.status || row.status || "429"} · no provider hop</small>
+        <small className="token-no-hop">{row.http?.status || row.status || "429"} · {errorSummary}</small>
       )}
     </div>
   );
@@ -644,17 +647,6 @@ function RequestDetail({
   request: RequestItem | null;
   onClose: () => void;
 }) {
-  const [traceData, setTraceData] = useState<any>(null);
-  const [traceLoading, setTraceLoading] = useState(false);
-  const [traceError, setTraceError] = useState<string | null>(null);
-  const requestId = request?.request_id || request?.trace_id || request?.id || null;
-
-  useEffect(() => {
-    setTraceData(null);
-    setTraceError(null);
-    setTraceLoading(false);
-  }, [requestId]);
-
   if (!request)
     return (
       <section
@@ -668,22 +660,6 @@ function RequestDetail({
     "intelligent_route",
     providerText(request),
   ];
-  const traceId = request.trace_id || request.trace?.trace_id || null;
-  const inspectTrace = async () => {
-    if (!requestId) return;
-    setTraceLoading(true);
-    setTraceError(null);
-    try {
-      const response = await fetch(`/api/v1/requests/${encodeURIComponent(requestId)}/trace`);
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.error || `trace inspection returned ${response.status}`);
-      setTraceData(body);
-    } catch (error) {
-      setTraceError(error instanceof Error ? error.message : "trace inspection unavailable");
-    } finally {
-      setTraceLoading(false);
-    }
-  };
   return (
     <section
       id="request-detail"
@@ -732,30 +708,11 @@ function RequestDetail({
             </strong>
           </div>
         </div>
-        {traceId && (
+        {(request.trace_id || request.trace?.trace_id) && (
           <div className="trace-inspection-actions">
-            <button className="secondary-button" onClick={inspectTrace} disabled={traceLoading}>
-              <ExternalLink size={14} /> {traceLoading ? "Loading routing spans…" : "Inspect routing spans"}
+            <button className="secondary-button" onClick={() => window.open(request.jaeger_url || request.trace?.jaeger_url || `http://localhost:16686/trace/${request.trace_id || request.trace?.trace_id}`, "praxis-jaeger", "width=1280,height=900") }>
+              <ExternalLink size={14} /> Open routing span in Jaeger
             </button>
-            <small className="trace-inspection-note">Jaeger stays private; spans are read through the UI server.</small>
-          </div>
-        )}
-        {traceError && <div className="trace-inspection-error">{traceError}</div>}
-        {traceData?.trace && (
-          <div className="trace-inspection-popup" role="dialog" aria-label="Jaeger trace inspection">
-            <div className="trace-inspection-popup-heading">
-              <div><strong>Jaeger trace inspection</strong><small>{traceData.quality || "observed"} · {traceData.trace.span_count || traceData.trace.spans?.length || 0} spans</small></div>
-              <button className="icon-button" aria-label="Close trace inspection" onClick={() => setTraceData(null)}><X size={15} /></button>
-            </div>
-            <div className="trace-span-list">
-              {(traceData.trace.spans || []).map((span: any, index: number) => (
-                <details className="trace-span" key={`${span.span_id || span.operation || "span"}-${index}`} open={index === 0}>
-                  <summary><strong>{span.operation || "span"}</strong><span>{span.service_name || "unknown service"} · {span.kind || "INTERNAL"}</span></summary>
-                  <div className="trace-span-meta"><span>span {span.span_id || "—"}</span><span>duration {span.duration_us ?? "—"} μs</span></div>
-                  {span.tags && Object.keys(span.tags).length > 0 && <dl>{Object.entries(span.tags).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{String(value)}</dd></div>)}</dl>}
-                </details>
-              ))}
-            </div>
           </div>
         )}
         <div className="callout">
@@ -804,17 +761,29 @@ function TokenPanel() {
   }, [refresh]);
   const live = status?.source === "live" || status?.mode === "live";
   const request = async (consumer: "a" | "b", app?: string) => {
+    const requestId = `ui-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const started = performance.now();
+    console.info("[token-request] start", { requestId, consumer, app: app || null });
     setBusy(true);
     try {
-      const result = await api.tokenRequest(consumer, app, app ? charges[app] || 5 : undefined);
-      await refresh();
+      const result = await api.tokenRequest(consumer, app, app ? charges[app] || 5 : undefined, requestId);
+      console.info("[token-request] response", { requestId, elapsedMs: Math.round(performance.now() - started) });
       window.dispatchEvent(
         new CustomEvent("token-rate-limit-updated", {
           detail: (result as any).record || null,
         }),
       );
+    } catch (error) {
+      console.error("[token-request] error", { requestId, elapsedMs: Math.round(performance.now() - started), error: error instanceof Error ? error.message : String(error) });
+      throw error;
     } finally {
+      // Re-enable the consumer buttons as soon as the request itself settles.
+      // The table refresh runs afterward without gating the buttons, so a slow
+      // refresh or background poll contention (e.g. during an overlay change)
+      // can no longer leave the gateway buttons unselectable.
       setBusy(false);
+      void refresh().then(() => console.info("[token-request] refresh-complete", { requestId, elapsedMs: Math.round(performance.now() - started) }));
+      console.info("[token-request] finished", { requestId, elapsedMs: Math.round(performance.now() - started) });
     }
   };
   const clear = async () => {
@@ -832,7 +801,7 @@ function TokenPanel() {
   const renderedRows = rows.map((r) => ({
     ...r,
     consumer: r.consumer || r.consumer_gateway,
-    provider: r.inference_provider || r.route?.inference_provider || r.provider || r.route?.provider_gateway,
+    provider: r.provider || r.route?.provider_gateway,
     status: r.status
       ? `HTTP ${r.status}`
       : r.http?.status
@@ -962,34 +931,20 @@ function TokenPanel() {
               </div>
             </section>
           )}
-          <div id="token-rate-limit-summary" className={`quota-summary${status.multi_quota ? " quota-summary-multi" : ""}`}>
-            <div>
-              <span>Principal / model</span>
-              {status.multi_quota ? <div className="quota-summary-app-list">{status.apps.map((app: any) => <strong key={app.id}><b>{app.name}</b><small>{app.model}</small></strong>)}</div> : <strong>{status.principal || status.username || "alice/canonical-model"}</strong>}
-            </div>
-            <div>
-              <span>Limit</span>
-              {status.multi_quota ? <div className="quota-summary-app-list">{status.apps.map((app: any) => <strong key={app.id}><b>{app.name}</b><small>{app.limit} tokens</small></strong>)}</div> : <strong>{`${status.quota?.configured_limit ?? status.quota?.limit ?? status.limit ?? "—"} tokens`}</strong>}
-            </div>
-            <div>
-              <span>Remaining</span>
-              {status.multi_quota ? <div className="quota-summary-app-list">{status.apps.map((app: any) => <strong key={app.id}><b>{app.name}</b><small>{app.raw_remaining ?? app.remaining ?? "—"} tokens</small></strong>)}</div> : <strong>{`${status.quota?.remaining ?? status.remaining ?? rows[0]?.quota?.remaining ?? "—"} tokens`}</strong>}
-            </div>
-            <div>
-              <span>Backend</span>
-              <strong>
-                {status.quota?.backend || status.backend || "shared Valkey"}
-              </strong>
-            </div>
-          </div>
+          {!status.multi_quota && <div id="token-rate-limit-summary" className="quota-summary">
+            <div><span>Principal / model</span><strong>{status.principal || status.username || "alice/canonical-model"}</strong></div>
+            <div><span>Limit</span><strong>{`${status.quota?.configured_limit ?? status.quota?.limit ?? status.limit ?? "—"} tokens`}</strong></div>
+            <div><span>Remaining</span><strong>{`${status.quota?.remaining ?? status.remaining ?? rows[0]?.quota?.remaining ?? "—"} tokens`}</strong></div>
+            <div><span>Backend</span><strong>{status.quota?.backend || status.backend || "shared Valkey"}</strong></div>
+          </div>}
           <div className="table-wrap">
             <table className="request-table token-request-table">
               <thead>
                 <tr>
                   <th>#</th>
+                  <th>Time</th>
                   <th>Application / consumer</th>
                   <th>Admission</th>
-                  <th>Remaining</th>
                   <th>Observed path</th>
                   <th>HTTP</th>
                 </tr>
@@ -999,9 +954,9 @@ function TokenPanel() {
                   visibleTokenRows.map((r, i) => (
                     <tr key={i}>
                       <td>{(Math.min(tokenRequestPage, tokenRequestPageCount) - 1) * REQUESTS_PER_PAGE + i + 1}</td>
+                      <td className="mono">{time(r.started_at || r.timestamp)}</td>
                       <td className="token-request-identity"><strong>{r.application || r.principal || "—"}</strong><small>{title(r.consumer)}</small></td>
                       <td>{r.admission || "—"}</td>
-                      <td>{r.quota?.remaining ?? r.remaining ?? "—"}</td>
                       <td><TokenPath row={r} /><TokenSettlement row={r} /></td>
                       <td>{r.status || "—"}</td>
                     </tr>
@@ -1287,7 +1242,12 @@ export function App() {
     const onTokenUpdate = (event: Event) => {
       const record = (event as CustomEvent<RequestItem>).detail;
       if (record) {
-        void refresh().finally(() => selectRequest(record));
+        setRequests((current) => [
+          record,
+          ...current.filter((item) =>
+            (item.request_id || item.id) !== (record.request_id || record.id)),
+        ]);
+        void refresh();
       } else {
         void refresh();
       }
@@ -1498,7 +1458,7 @@ export function App() {
                   <p>Only {app.name} traffic is shown here. Eligible providers remain visible; the selected route uses {app.name} color.</p>
                   <p className="active-route-summary">
                     {appActiveRequest
-                      ? `Active request ${appActiveRequest.request_id || appActiveRequest.id || "—"}: ${appActiveRequest.consumer_gateway || appActiveRequest.consumer || "consumer"} → ${providerText(appActiveRequest)}`
+                      ? `Active request ${appActiveRequest.request_id || appActiveRequest.id || "—"}: ${appActiveRequest.consumer_gateway || appActiveRequest.consumer || "consumer"} → ${appActiveRequest.route?.provider_gateway || appActiveRequest.provider || "no provider"}`
                       : `No live ${app.name} request observed yet.`}
                   </p>
                 </div>
@@ -1518,7 +1478,7 @@ export function App() {
                 <span className="eyebrow">Live topology</span>
                 <h2>Control-plane context and request path</h2>
                 <p>Active provider routes are red; eligible alternatives remain visible in gray.</p>
-                <p className="active-route-summary">{activeRequest ? `Active request ${activeRequest.request_id || activeRequest.id || "—"}: ${activeRequest.consumer_gateway || activeRequest.consumer || "consumer"} → ${providerText(activeRequest)}` : "Select a request row to show its active path."}</p>
+                <p className="active-route-summary">{activeRequest ? `Active request ${activeRequest.request_id || activeRequest.id || "—"}: ${activeRequest.consumer_gateway || activeRequest.consumer || "consumer"} → ${activeRequest.route?.provider_gateway || activeRequest.provider || "no provider"}` : "Select a request row to show its active path."}</p>
               </div>
               <Badge tone="info">{providers.length || 0} observed providers</Badge>
             </div>

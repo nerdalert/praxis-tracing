@@ -1,0 +1,24 @@
+[
+  {
+    "id": "app-a",
+    "name": "App-a",
+    "username": "alice",
+    "model": "Qwen/Qwen3-0.6B",
+    "color": "#2f80ed",
+    "limit": 60,
+    "windowSeconds": 60,
+    "estimateTokens": 5,
+    "passwordFile": "/tmp/app-a-password"
+  },
+  {
+    "id": "app-b",
+    "name": "App-b",
+    "username": "bob",
+    "model": "Qwen/Qwen3-0.6B",
+    "color": "#d98200",
+    "limit": 5000,
+    "windowSeconds": 600,
+    "estimateTokens": 5,
+    "passwordFile": "/tmp/app-b-password"
+  }
+]

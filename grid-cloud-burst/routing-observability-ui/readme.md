@@ -1,0 +1,366 @@
+# Grid Routing Observability UI
+
+Real-time dashboard for the AI Grid two-pool routing scenario.
+Shows pool scores, routing decisions, and trace timelines with
+direct Jaeger links.
+
+## Evidence status
+
+The dashboard does not ask users to choose between implementation modes. It
+reports the evidence available for the selected environment:
+
+- `LIVE EVIDENCE` means the values came from reachable Jaeger/Grid services.
+- `LIVE EPP METRICS` means the llm-d/VCR provider cards include a current EPP
+  sample. This is the only view that presents queue and KV pressure metrics.
+- `SIMULATION ENABLED` means local fixtures are enabled explicitly for a
+  presentation; every generated request is labeled simulated.
+- `UNAVAILABLE` means the required live source could not be read. The UI does
+  not invent provider, score, metric, or trace values.
+
+Simulation is opt-in. For local synthetic fixtures only, start with:
+For local synthetic fixtures only, start with:
+
+```console
+ALLOW_SIMULATION=true ./scripts/start.sh
+```
+
+Synthetic requests, presenter scripts, and replay are labeled `SIMULATED` and
+are not runtime evidence.
+
+## Quick start
+
+```console
+cd routing-observability-ui
+./scripts/start.sh
+```
+
+Open http://localhost:3001 in a browser.
+
+For the real GLB tracing path, use the OTel-enabled Praxis AI fork:
+<https://github.com/nerdalert/ai/tree/grid-otel-demo>. The released Praxis
+image does not include the experimental tracing hooks used by that demo.
+
+## Demo scenarios
+
+In Demo mode, four scenarios are available:
+
+| Scenario | Description |
+|----------|-------------|
+| Baseline | Pool A preferred (local advantage, low queue depth) |
+| Pressure Failover | Pool A queue saturated, traffic shifts to Pool B |
+| Recovery | Pool A queue recovered, traffic returns to Pool A |
+| Pool A Degraded | Pool A unhealthy, all traffic to Pool B |
+
+## API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/status` | GET | Current mode, Jaeger reachability |
+| `/api/pools` | GET | Pool state with scores |
+| `/api/traces?limit=N` | GET | Recent traces with Jaeger links |
+| `/api/scenarios` | GET | Available demo scenarios |
+| `/api/mode` | POST | Switch mode (`auto`, `live`, `demo`) |
+| `/api/scenario/:name` | POST | Trigger demo scenario |
+
+The request-first v2 contract is under `/api/v1`:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/capabilities` | GET | Detected environment and capability states |
+| `/api/v1/requests` | GET | Normalized, filtered, cursor-paginated requests |
+| `/api/v1/requests/:requestId` | GET | Request detail, provenance, and replay safety |
+| `/api/v1/events/stream` | GET | Server-sent request/generation/replay events |
+| `/api/v1/replays` | POST | Queue a synthetic-only replay |
+| `/api/load/status` | GET | Live llm-d sustained-load capability and job state |
+| `/api/load` | POST | Start a bounded real llm-d load job |
+| `/api/load/cancel` | POST | Stop the active llm-d load job |
+
+Implementation and checkpoint notes are in
+[`../docs/v2-implementation.md`](../docs/v2-implementation.md).
+
+## Live llm-d / VCR metrics
+
+Select `llm-d/EPP` in the dashboard to read the running pool-metrics demo rather
+than recorded evidence. With the two Kind clusters deployed, start the UI
+from this directory:
+
+```console
+JAEGER_URL=http://localhost:16686 \
+VCR_LIVE=true \
+VCR_KUBECTL_CONTEXT_A=kind-grid-llmd-pm-pool-a \
+VCR_KUBECTL_CONTEXT_B=kind-grid-llmd-pm-pool-b \
+PORT=3001 node server.js
+```
+
+The server reads each pool's `llmd-epp-metrics` service through the Kubernetes
+API proxy and reads the consumer gateway's current routing overlay ConfigMap.
+It displays raw queue depth, normalized queue pressure, KV-cache utilization,
+score, rank, scoring strategy, and overlay revision. Live reads are cached for
+two seconds to match the dashboard refresh cadence. If the configured Kind
+contexts are unavailable, `VCR_EVIDENCE_DIR` can provide a recorded fallback.
+
+The live source expects the pool-metrics demo's default contexts and ConfigMap;
+override `VCR_NAMESPACE`, `VCR_OVERLAY_CONFIGMAP`, or `VCR_QUEUE_CAPACITY` when
+using a data-driven topology with different resource names or queue capacity.
+
+## Opt-in token-rate-limit demo
+
+The quota view is disabled by default and does not request quota-specific data.
+Enable the capability explicitly with:
+
+```console
+TRACING_UI_TOKEN_RATE_LIMIT=true node server.js
+```
+
+Synthetic quota fixtures require a second explicit setting:
+
+```console
+TRACING_UI_TOKEN_RATE_LIMIT=true \
+TRACING_UI_FIXTURE_MODE=token-rate-limit \
+node server.js
+```
+
+The fixture view uses the normalized `/api/v1/token-rate-limit` contract and
+shows principal `alice`, the canonical model, both ingress consumers, one
+shared quota key, admission, remaining capacity, reset and `Retry-After`
+details, provider distribution, overlay revision, and the complete admitted or
+denied path. Denied HTTP 429 requests visibly stop after quota admission and
+have no provider or backend hop. Available fixture states are `admitted`,
+`exhausted`, `concurrent-race`, and `recovered`.
+
+The contract is intentionally independent of OTel exporter attribute names:
+`request`, `quota`, `route`, `http`, and `trace` are normalized at the adapter
+boundary. Synthetic fixtures and the live server-side adapter populate the
+same UI contract and remain visibly distinguished by their provenance label.
+
+### Live distributed-quota profile
+
+The live profile sends authenticated requests from the UI server, never from
+browser JavaScript. Configure both consumer gateways and provide the demo
+password through an environment variable or mounted file:
+
+```console
+TRACING_UI_TOKEN_RATE_LIMIT=true \
+TRACING_UI_TOKEN_CONSUMER_A_URL=http://consumer-a.example:8080 \
+TRACING_UI_TOKEN_CONSUMER_B_URL=http://consumer-b.example:8080 \
+TRACING_UI_TOKEN_USERNAME=alice \
+TRACING_UI_TOKEN_PASSWORD_FILE=/run/secrets/alice-password \
+TRACING_UI_TOKEN_MODEL=Qwen/Qwen3-0.6B \
+TRACING_UI_TOKEN_LIMIT=60 \
+TRACING_UI_TOKEN_WINDOW_SECONDS=60 \
+PORT=3001 \
+node server.js
+```
+
+`TRACING_UI_TOKEN_PASSWORD` is available for isolated local development, but a
+mounted secret file is preferred. Neither form is returned through the API or
+included in browser assets.
+
+When the complete live contract is present, the page switches to the focused
+distributed-token-quota profile. It hides unrelated GLB and llm-d generators
+and shows:
+
+- Consumer Gateway A and Consumer Gateway B as separate edge entries;
+- one shared Valkey quota ledger;
+- west, central, and east provider gateways from the Grid overlay;
+- explicit request buttons for both consumers;
+- one persistent observed row and compact request path per response;
+- live provider attribution and rate-limit response headers;
+- pre-provider `429` and `503` paths with no provider placeholder;
+- a clear-results action that changes only bounded UI history.
+
+The in-memory display history is capped at 100 requests. Clearing it does not
+reset Valkey, delete traces, restart gateways, or change provider/backend
+counters. Admitted responses that do not contain rate-limit headers show their
+observed token usage without fabricating a remaining-quota value. Authoritative
+limit, remaining, reset, and `Retry-After` values appear when emitted by the
+gateway.
+
+When `llm-d/EPP` is selected, Generate Requests sends real HTTP traffic through
+the selected consumer gateway. `Traffic origin` chooses Pool A or Pool B as the
+gateway where the request enters; it does not tell Grid which provider to
+select. `Concurrent workers` controls simultaneous requests, and `Tokens/request`
+controls response duration. Use the documented pressure values (24 workers
+and 64 tokens) to make EPP queue pressure visible; the UI records gateway
+status, latency, and `X-Grid-LlmD-Provider-Gateway` attribution. These gateway
+observations remain clearly labeled sampled when the gateway image does not
+emit an OTel trace.
+
+For a sustained pressure test, use **Run sustained load** below the ordinary
+request generator. Select the gateway where pressure should enter, duration,
+total request rate, worker concurrency, and a pressure pattern. **Pulse
+batches** preserves burst-and-recovery behavior; **Sustained workers** keeps
+independent workers replenishing requests until the duration expires or you
+stop the job. The provider cards and EPP details continue to refresh while the
+load runs. The load panel reports ingress-gateway verification, HTTP outcomes,
+and provider attribution; it does not claim that the selected ingress pool was
+the provider chosen by Grid. This control is available only for the live
+llm-d/EPP source and requires both Kind pool contexts.
+
+## Opt-in cloud-burst demo
+
+The cloud-burst panel is disabled by default and, like the quota view, requests
+no cloud-burst data until it is explicitly enabled. It visualizes local-first
+routing with burst to an external provider: sustained load raises the local
+llm-d EPP queue, stabilized admission flips to `existing_only`, and new requests
+burst to the external target while existing sessions stay local. Enable it with:
+
+```console
+TRACING_UI_TOKEN_CLOUD_BURST=true \
+TRACING_UI_CB_CONTEXT=kind-grid-token-rate-limit-west \
+node server.js
+```
+
+### Backend sensitivity: Simulation vs Real GPU
+
+A real GPU pool saturates — and therefore bursts — on a far smaller queue than
+the kind `llm-d-inference-sim` mock, whose deep waiting queue needs heavy load
+to fill. The **Backend** dropdown on the load generator selects the sensitivity
+preset; each preset sets both the pressure-gauge capacity (visualization) and
+the generator replica count (how much load *Simulate load* applies):
+
+| Mode | Gauge capacity | Generator replicas | Meaning |
+|------|----------------|--------------------|---------|
+| `sim` (default) | `TRACING_UI_CB_QUEUE_CAPACITY` (8) | `TRACING_UI_CB_LOAD_REPLICAS` (3) | kind mock — deep queue, needs heavy load |
+| `gpu` | `TRACING_UI_CB_QUEUE_CAPACITY_GPU` (2) | `TRACING_UI_CB_LOAD_REPLICAS_GPU` (1) | real GPU — saturates and bursts on light load |
+
+`TRACING_UI_CB_MODE` (default `sim`) sets the initial selection. The badge
+(`LOCAL` / `CLOUD BURST ACTIVE`) always reflects the **real** Grid admission
+state read from the overlay, not the dropdown. The dropdown changes the load
+applied and the gauge sensitivity only. For an actual GPU deployment, set Grid's
+`scoringPolicy` queue-depth capacity to match `TRACING_UI_CB_QUEUE_CAPACITY_GPU`
+so the real admission flip lines up with the gauge.
+
+### Interactive cloud-burst console
+
+When the cloud-burst gate is enabled, the panel provides bounded operator
+controls for the static-metric Kind topology. Controls call the UI server,
+which performs the privileged work; the browser never receives cluster
+credentials or the OpenAI key.
+
+- Per-provider sliders and calm/pressure/saturate presets update the
+  `llm-d-inference-sim` metric and wait for Grid/Praxis convergence.
+- Bounded authenticated traffic can be sent through Consumer A or B with
+  sticky or unique sessions. Results use observed provider headers and usage.
+- Weight changes, health changes, recovery, and baseline/partial/full scenarios
+  are applied through the server-side control API.
+- Cloud cost uses real OpenAI usage for cloud hits. Local sim usage is labeled
+  estimated when the backend emits no usage metadata.
+- The guided tour runs the main baseline, pressure, burst, recovery, and
+  reweight sequence. Actions reflect live state or an explicit error; they do
+  not fabricate quota or routing data.
+
+The allocation buttons intentionally report that dynamic policy reload is not
+wired when the mounted gateway configuration has no reloadable allocation
+source. They are not proof of soft/hard allocation behavior until a real
+gateway policy watcher and reload barrier are deployed.
+
+## Narrated recording workflow
+
+The multi-quota recording uses the live UI capture as the source of truth. Keep
+the recorded browser segment unchanged and place browser-rendered slides before
+and after it. The recording should show Odin, Thor, and Loki, their separate
+sliding-window budgets, the fixed reservation, actual total usage, refunds or
+overage, charge-by-charge expiry, provider attribution, and 429 responses that
+stop before provider routing.
+
+The reference workflow uses OpenAI speech generation and Whisper caption timing:
+
+1. Write narration scene by scene and keep each TTS request below the API input
+   limit. Paragraph-sized requests make it easier to re-time narration when the
+   live capture changes.
+2. Generate WAV narration with `tts-1-hd` and the `alloy` voice. Keep the API
+   key in the environment or a local secret file; never put it in this
+   repository or browser code.
+3. Transcribe the final concatenated WAV with `whisper-1` using
+   `verbose_json` and segment timestamps.
+4. Add the intentional visual lead-in to the caption timestamps, then inspect
+   the SRT for overlaps and readable lower-third placement.
+5. Assemble the slides, the unchanged live capture, narration, and captions
+   with FFmpeg. Include a short opening pause and a quiet closing hold so the
+   final narration is not clipped.
+6. Review the assembled video at the slide/live-capture transition, during the
+   quota-expiry wait, and at the closing hold. Re-run TTS, caption generation,
+   and assembly together whenever narration text changes.
+
+Example settings:
+
+```console
+export OPENAI_API_KEY="$(< /path/to/openai-key)"
+
+# Run these from a recording package containing the corresponding scripts.
+./generate-voice.sh
+node narration/generate-srt.mjs
+./assemble.sh
+```
+
+The recording script must send `model: "tts-1-hd"`, `voice: "alloy"`,
+`response_format: "wav"`, and `speed: 1.0` in its speech request. The current
+reference package uses those settings with
+`whisper-1` segment timing, a three-second opening delay, and a final silent
+hold. If the live capture duration changes, update the slide segment durations,
+audio delay, caption offset, and final hold as one timing change; do not reuse
+old captions against a new narration length. Validate the final media with
+`ffprobe` and preserve the source capture, narration text, WAV, transcription,
+SRT, metadata, and checksums alongside the output.
+
+## Scoring model
+
+Matches the Grid scoring crate:
+
+- Locality weight: 3.0 (Local=1.0, Remote=0.4)
+- Queue depth weight: 5.0 (inverted: lower queue = higher score)
+- Composite = locality_weight * locality + queue_weight * (1 - queue_depth)
+
+## Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `3001` | UI server port |
+| `JAEGER_URL` | `http://localhost:16686` | Jaeger query API base URL |
+| `JAEGER_UI_URL` | value of `JAEGER_URL` | Browser-visible Jaeger UI base URL used by **Open raw trace**; set this to the forwarded/public Jaeger address when the dashboard is remote |
+| `TRACING_UI_TOKEN_CLOUD_BURST` | unset | Feature gate for the opt-in cloud-burst panel |
+| `TRACING_UI_CB_CONTEXT` | unset | kube context the panel reads (also required to enable the panel) |
+| `TRACING_UI_CB_NAMESPACE` | `grid-system` | Namespace for overlay/EPP/load lookups |
+| `TRACING_UI_CB_MODE` | `sim` | Initial backend-sensitivity preset (`sim` or `gpu`) |
+| `TRACING_UI_CB_QUEUE_CAPACITY` | `8` | `sim` gauge capacity (queue depth mapped to 100%) |
+| `TRACING_UI_CB_QUEUE_CAPACITY_GPU` | `2` | `gpu` gauge capacity — real GPU bursts on less queue |
+| `TRACING_UI_CB_LOAD_REPLICAS` | `3` | `sim` generator replicas when load is on |
+| `TRACING_UI_CB_LOAD_REPLICAS_GPU` | `1` | `gpu` generator replicas — lighter load |
+| `TRACING_UI_CB_LOAD_DEPLOY` | `epp-load` | Deployment scaled by *Simulate load* |
+| `TRACING_UI_CB_QUEUE_METRIC` | `inference_pool_average_queue_size` | EPP queue metric scraped for pressure |
+| `TRACING_UI_CB_EXTERNAL_TARGET` | `api.openai.com` | External burst target shown in the topology |
+| `TRACING_UI_CB_CONTROL_SCRIPT` | unset | Required server-side static-metric helper |
+| `TRACING_UI_CB_PRINCIPAL` | `alice` | Server-side principal used by bounded cloud-burst traffic |
+| `TRACING_UI_CB_PASSWORD` | unset | Server-side password; never expose it to the browser |
+| `TRACING_UI_CB_TRAFFIC_LIMIT` | `100000` | Maximum logical quota for the bounded traffic adapter |
+
+Raw-trace links are shown only for requests with an indexed Jaeger trace. Live
+gateway responses from the llm-d/VCR request generator are real HTTP results,
+but they are sampled gateway observations when no OTel trace ID is returned;
+their request details therefore show **Raw trace unavailable for this
+observation** instead of navigating to a dummy `/#` URL. The same rule applies
+to local demo rows and any other observation without exact trace evidence.
+
+For a two-application quota view, set `TRACING_UI_TOKEN_MULTI_QUOTA=true` and
+point `TRACING_UI_TOKEN_APPS_FILE` at
+`examples/token-rate-limit-apps.app-a-b.json`. The example uses App-a/alice and
+App-b/bob as separate authenticated identities with separate Valkey quota rules;
+passwords are supplied through server-side files and are never sent to the
+browser. The gateway must contain matching authenticated users and rules.
+
+## Teardown
+
+```console
+./scripts/stop.sh
+```
+
+## Optional development checks
+
+These checks are for UI development and are not required to start or present
+the live llm-d/EPP demo. The presentation workflow should start the UI, keep
+the Kind clusters running, and observe the real metrics and routes instead.
+
+```console
+npm test
+```
