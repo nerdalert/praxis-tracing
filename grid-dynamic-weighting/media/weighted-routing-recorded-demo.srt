@@ -1,0 +1,39 @@
+1
+00:03:10,000 --> 00:03:24,000
+The live dashboard begins with the three provider pools and their current routing state.
+
+2
+00:03:30,500 --> 00:03:52,000
+The routing sampler sends real requests through the consumer gateway and measures successful provider selections.
+
+3
+00:03:52,500 --> 00:04:15,000
+With all simulated queues idle, the effective weights are equal and the measured shares vary statistically around equal thirds.
+
+4
+00:04:15,500 --> 00:04:38,000
+The simulator metric is changed independently from request sampling. Grid observes the new metric and publishes a revised effective preference.
+
+5
+00:04:38,500 --> 00:05:02,000
+The dashboard shows the effective weights and expected shares from the served overlay, separately from the measured request sample.
+
+6
+00:05:02,500 --> 00:05:26,000
+The Grid, accepted, and serving revisions converge before the updated routing state is measured.
+
+7
+00:05:26,500 --> 00:05:50,000
+The sampler continues while the routing preference changes. The request results retain provider attribution and latency.
+
+8
+00:05:50,500 --> 00:06:14,000
+The simulated metrics are returned to zero, and the effective weights recover to the equal-capacity baseline.
+
+9
+00:06:14,500 --> 00:06:39,000
+Measured traffic is a finite sample, so its percentages need not equal the expected overlay shares exactly.
+
+10
+00:06:39,500 --> 00:06:43,800
+The recorded dashboard demonstration ends with the recovered routing state.

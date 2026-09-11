@@ -1,0 +1,1 @@
+Weighted routing is demonstrated across three independent inference clusters. Configured capacity and live EPP metrics changed Grid's effective weights, Praxis served the converged overlays, and measured requests followed the expected preference without request-path control-plane calls. This concludes the demonstration.

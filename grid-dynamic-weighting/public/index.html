@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Grid Routing Observability</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <h1>Grid Routing Observability</h1>
+  <span class="subtitle">AI Grid — Global Load-Balancing (GLB) Routing Observability</span>
+    </div>
+    <div class="header-right">
+      <div id="source-badge" class="badge badge-source">GLB</div>
+      <div id="evidence-badge" class="badge badge-unknown">CHECKING EVIDENCE</div>
+      <div class="source-controls">
+        <button id="btn-src-glb" class="source-btn active" onclick="setDataSource('glb')">GLB</button>
+        <button id="btn-src-vcr" class="source-btn" onclick="setDataSource('vcr')">llm-d/EPP</button>
+        <button id="btn-src-combined" class="source-btn" onclick="setDataSource('combined')">Combined</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Scenario Controls (demo mode) -->
+    <section id="scenario-bar" class="scenario-bar hidden">
+      <span class="scenario-label">Scenario:</span>
+      <div id="scenario-buttons" class="scenario-buttons"></div>
+      <span id="scenario-desc" class="scenario-desc"></span>
+    </section>
+
+    <!-- V2 request-centric explorer -->
+    <section id="request-explorer" class="request-explorer" aria-labelledby="request-explorer-title">
+      <div class="explorer-heading">
+        <div>
+          <div class="eyebrow">Unified request explorer</div>
+          <h2 id="request-explorer-title">Observed request history</h2>
+          <p class="section-help">A rolling view of requests already observed by Grid. Select a row to inspect its path and evidence; use Generate Requests below to create new traffic.</p>
+        </div>
+        <div class="explorer-actions">
+          <span id="capability-summary" class="data-quality-chip">Detecting environment…</span>
+        </div>
+      </div>
+      <div class="request-toolbar">
+        <label>Window <select id="request-window"><option value="15">Last 15 minutes</option><option value="60">Last hour</option><option value="1440">Last day</option></select></label>
+        <label class="history-control">Replay window <input id="history-scrubber" type="range" min="10" max="100" step="10" value="100"><span id="history-scrubber-label">All requests</span></label>
+        <div class="replay-buttons"><button id="replay-back" class="secondary-btn" type="button" title="Step backward">‹</button><button id="replay-play" class="secondary-btn" type="button">Play</button><button id="replay-forward" class="secondary-btn" type="button" title="Step forward">›</button><select id="replay-speed" aria-label="Replay speed"><option value="1200">0.5×</option><option value="700" selected>1×</option><option value="350">2×</option></select></div><span id="replay-state" class="replay-state" aria-live="polite">Showing requests</span>
+        <label>Provider <select id="request-provider"><option value="">All providers</option></select></label>
+        <label class="request-search">Search <input id="request-search" type="search" placeholder="request, trace, provider…"></label>
+        <button id="request-refresh" class="secondary-btn" type="button">Refresh</button>
+        <span id="request-live-indicator" class="live-indicator"><span></span> Live stream connected</span>
+      </div>
+      <div id="request-summary-strip" class="request-summary-strip"></div>
+      <div id="request-history-explainer" class="block-explainer"><strong>Observed request history</strong><span>Each row is one request already seen in the selected time window. It is not the active generator job below.</span></div>
+      <div class="request-table-wrap">
+        <table id="request-table" class="request-table">
+          <thead><tr><th title="When the request entered the observed system">Started (time)</th><th title="User-facing outcome score based on status and timing">Experience (health)</th><th title="HTTP response status">Status (HTTP)</th><th title="Selected backend and causal service path">Selected provider / observed path</th><th title="Time to first token, when available">TTFT (first token)</th><th title="Synchronous GLB routing/filter span time; not full HTTP latency">Routing span (not request)</th><th title="Routing score and candidate rank, when recorded">Score / rank (routing)</th><th title="Whether exact trace evidence is available">Trace (evidence)</th><th aria-label="Inspect"></th></tr></thead>
+          <tbody id="request-body"><tr><td colspan="9" class="empty-state">Loading request summaries…</td></tr></tbody>
+        </table>
+      </div>
+      <div id="replay-spotlight" class="replay-spotlight" aria-live="polite"></div>
+      <div class="request-pagination"><button id="request-older" class="secondary-btn" type="button" disabled>Load older</button><span id="request-page-status">0 requests</span></div>
+    </section>
+
+    <!-- Explicitly gated token-rate-limit demo -->
+    <section id="token-rate-limit-panel" class="token-rate-limit-panel hidden" aria-labelledby="token-rate-limit-title">
+      <div class="explorer-heading">
+        <div>
+          <div class="eyebrow">Opt-in quota demo</div>
+          <h2 id="token-rate-limit-title">Shared token-rate limit</h2>
+          <p class="section-help">Live requests through two consumer gateways sharing one model quota. Admitted traffic selects a provider; denied traffic stops before routing.</p>
+        </div>
+        <span id="token-rate-limit-source" class="data-quality-chip">Disabled</span>
+      </div>
+      <div id="token-rate-limit-controls" class="token-rate-limit-controls" role="group" aria-label="Token-rate-limit fixture state">
+        <button class="secondary-btn token-state-btn active" data-token-state="recovered" type="button">Recovery</button>
+        <button class="secondary-btn token-state-btn" data-token-state="admitted" type="button">Admitted</button>
+        <button class="secondary-btn token-state-btn" data-token-state="exhausted" type="button">Exhausted</button>
+        <button class="secondary-btn token-state-btn" data-token-state="concurrent-race" type="button">Concurrent race</button>
+      </div>
+      <div id="token-rate-limit-live-controls" class="token-rate-limit-controls hidden" role="group" aria-label="Live token-rate-limit requests">
+        <button id="token-request-a" class="primary-btn" type="button">Request through Consumer Gateway A</button>
+        <button id="token-request-b" class="primary-btn token-consumer-b" type="button">Request through Consumer Gateway B</button>
+        <button id="token-clear-results" class="secondary-btn" type="button">Clear results</button>
+        <span id="token-request-status" class="generator-status" role="status">Ready</span>
+      </div>
+      <div id="token-live-topology" class="token-live-topology hidden" aria-label="Token-rate-limit live topology">
+        <div class="token-topology-stage">
+          <div class="token-topology-heading">
+            <span>Client requests</span>
+            <b aria-hidden="true">↓</b>
+            <span>Edge entry</span>
+          </div>
+          <div class="token-topology-pair">
+            <div class="token-topology-card consumer"><strong>Consumer Gateway A</strong><small>Edge entry</small></div>
+            <div class="token-topology-card consumer"><strong>Consumer Gateway B</strong><small>Edge entry</small></div>
+          </div>
+        </div>
+        <div class="token-topology-connector quota"><span>shared accounting</span></div>
+        <div class="token-topology-stage compact">
+          <div class="token-topology-card quota"><strong>Shared Valkey quota</strong><small>One Alice / model ledger</small></div>
+        </div>
+        <div class="token-topology-connector route"><span>quota admitted · intelligent_route</span></div>
+        <div class="token-topology-stage providers">
+          <span class="token-topology-label">Provider gateways from the Grid overlay</span>
+          <div class="token-topology-provider-grid">
+            <div class="token-topology-card provider"><strong>Provider West</strong><small>Cluster West · <span id="token-provider-west-count">0 requests</span></small></div>
+            <div class="token-topology-card provider"><strong>Provider Central</strong><small>Cluster Central · <span id="token-provider-central-count">0 requests</span></small></div>
+            <div class="token-topology-card provider"><strong>Provider East</strong><small>Cluster East · <span id="token-provider-east-count">0 requests</span></small></div>
+          </div>
+          <div class="token-grid-overlay-note"><strong>Grid overlay</strong><span>Same three provider candidates loaded by both consumers; no request-time Grid call.</span></div>
+        </div>
+      </div>
+      <div id="token-rate-limit-empty" class="token-rate-limit-empty hidden" role="status"></div>
+      <div id="token-rate-limit-content">
+        <div id="token-rate-limit-summary" class="token-rate-limit-summary"></div>
+        <div class="request-table-wrap">
+          <table class="request-table token-request-table">
+            <thead><tr><th>#</th><th>Principal / model</th><th>Edge entry</th><th>Admission</th><th>Quota</th><th>Selected provider</th><th>Request path</th><th>HTTP</th><th>Trace</th></tr></thead>
+            <tbody id="token-rate-limit-requests"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="request-detail" class="request-detail-panel hidden" aria-live="polite">
+      <div class="explorer-heading"><div><div class="eyebrow">Request detail</div><h2 id="request-detail-title">Select a request</h2></div><button id="request-detail-close" class="close-btn" type="button">Close</button></div>
+      <div id="request-detail-content" class="request-detail-content"></div>
+    </section>
+
+    <!-- Live request generator -->
+    <section id="request-generator" class="request-generator">
+      <div class="request-generator-header">
+        <div>
+          <h2>Generate Requests</h2>
+          <p>Send real requests through the live Grid global load-balancer (GLB) gateway and watch traces appear below.</p>
+        </div>
+        <span id="generator-status" class="generator-status">Ready</span>
+      </div>
+      <div class="request-generator-controls">
+        <label>Requests <input id="generator-count" type="number" min="1" max="100" value="10"></label>
+        <label>Rate/sec <input id="generator-rate" type="number" min="0.1" max="20" step="0.1" value="1"></label>
+        <label>Traffic origin <select id="generator-pool"><option value="pool-a">Pool A gateway</option><option value="pool-b">Pool B gateway</option></select></label>
+        <label>Concurrent workers <input id="generator-concurrency" type="number" min="1" max="24" value="1"></label>
+        <label>Tokens/request <input id="generator-max-tokens" type="number" min="1" max="256" value="5"></label>
+        <label class="prompt-field">Prompt <input id="generator-prompt" type="text" maxlength="500" value="dashboard observability request"></label>
+        <button id="generator-start" class="primary-btn" onclick="startRequestGeneration()">Generate requests</button>
+        <button id="generator-cancel" class="secondary-btn hidden" onclick="cancelRequestGeneration()">Stop</button>
+      </div>
+      <div id="generator-target-status" class="generator-target-status" aria-live="polite">
+        <strong>Checking request target…</strong>
+      </div>
+      <div id="generator-progress" class="generator-progress" aria-live="polite">No requests generated yet.</div>
+      <div id="generator-results" class="generator-results" aria-live="polite">
+        <div class="generator-results-empty">Each generated request will appear here with its result and observed route.</div>
+      </div>
+      <div id="generator-attribution" class="generator-attribution" aria-live="polite">Observed trace attribution will appear here.</div>
+      <div id="llmd-load" class="llmd-load hidden" aria-labelledby="llmd-load-title">
+        <div class="llmd-load-header">
+          <div>
+            <div class="eyebrow">llm-d pressure control</div>
+            <h2 id="llmd-load-title">Run sustained load</h2>
+            <p>Send continuous real requests from this dashboard process into one consumer gateway to raise pressure on that pool. This is a load entry point, not a routing choice: Grid still selects the provider for each request.</p>
+          </div>
+          <span id="load-status" class="generator-status">Ready</span>
+        </div>
+        <div class="llmd-load-controls">
+          <label>Load enters through <select id="load-pool"><option value="pool-a">Pool A gateway</option><option value="pool-b">Pool B gateway</option></select></label>
+          <label>Pressure pattern <select id="load-mode"><option value="pulse">Pulse batches</option><option value="sustained">Sustained workers</option></select></label>
+          <label>Duration (sec) <input id="load-duration" type="number" min="5" max="300" value="30"></label>
+          <label>Rate (req/sec) <input id="load-rate" type="number" min="0.1" max="50" step="0.1" value="20"></label>
+          <label>Concurrent workers <input id="load-concurrency" type="number" min="1" max="24" value="24"></label>
+          <label>Tokens/request <input id="load-max-tokens" type="number" min="1" max="256" value="64"></label>
+          <button id="load-start" class="primary-btn" type="button" onclick="startLoadGeneration()">Start load</button>
+          <button id="load-cancel" class="secondary-btn hidden" type="button" onclick="cancelLoadGeneration()">Stop load</button>
+        </div>
+        <div id="load-target-status" class="generator-target-status" aria-live="polite"><strong>Checking llm-d load target…</strong></div>
+        <div id="load-progress" class="load-progress" aria-live="polite">No sustained load running.</div>
+        <div id="load-epp-details" class="load-epp-details" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <section class="path-note">
+      <h2>Trace one request</h2>
+      <p>Use the request rows above to inspect the complete observed path. Provider pressure and score detail are intentionally omitted from this focused view until they can be tied to the same request with exact provenance.</p>
+    </section>
+
+  </main>
+
+  <footer>
+    <span>Grid Routing Observability UI</span>
+    <span id="footer-jaeger"></span>
+    <span id="footer-refresh">Refreshing every 3s</span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

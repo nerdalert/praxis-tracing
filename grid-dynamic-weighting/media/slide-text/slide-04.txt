@@ -1,0 +1,9 @@
+Three-Cluster Demo Topology
+
+Pool A cluster       Pool B cluster       Pool C cluster
+GridSite             GridSite             GridSite
+Consumer gateway     Consumer gateway     Consumer gateway
+Provider gateway     Provider gateway     Provider gateway
+EPP + two simulators EPP + two simulators EPP + two simulators
+
+The consumer tier shares converged Grid routing state.

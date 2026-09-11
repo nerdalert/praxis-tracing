@@ -1,0 +1,7 @@
+Static Capacity and Dynamic Pressure
+
+Static: configured capacity 100 / 100 / 100
+Dynamic: capacity adjusted by EPP-reported pressure
+
+The simulator reports queue depth.
+The sampler measures routing; it does not create load.

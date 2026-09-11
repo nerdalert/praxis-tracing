@@ -1,0 +1,8 @@
+What the Demo Will Prove
+
+STATIC WEIGHTING
+Equal capacity and equal pressure produce equal expected shares.
+
+DYNAMIC WEIGHTING
+Changing one pool's reported pressure changes effective weights,
+the converged overlay, and the measured distribution.

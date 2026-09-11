@@ -1,0 +1,7 @@
+Weighted Multi-Cluster Routing
+
+One logical Grid routing system
+over independent inference pools
+
+Configured capacity is the expected preference.
+Measured traffic is the finite observed sample.

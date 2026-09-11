@@ -1,0 +1,23 @@
+1
+00:00:01,000 --> 00:00:28,000
+The following demonstration shows weighted provider selection across multiple Kubernetes clusters. Grid gives platform engineers one logical routing system over independent inference pools. Configured capacity expresses the intended preference, while attributed requests show the distribution actually observed over a finite sample. These values should trend together, but measured traffic will not match the expected percentages exactly.
+
+2
+00:00:28,500 --> 00:00:59,500
+Grid resolves the control-plane decision before a request reaches the weighted picker. It first removes providers that fail model capability, authorization, trust, health, freshness, or admission requirements. The routing policy then determines the first viable selection group, including whether locality or provider score has priority. Existing session affinity is honored next. Only new, unbound requests are distributed by weighted selection among eligible providers in that active group.
+
+3
+00:01:00,000 --> 00:01:30,500
+Static weighting begins with operator-configured relative capacity. In this demo, all three pools start at one hundred, so their baseline shares are equal. Dynamic placement combines that capacity with normalized pressure reported by each pool's simulators through its EPP metrics endpoint. The request sampler does not create queue pressure. It generates inference requests so the resulting provider selections can be measured independently from the configured metrics.
+
+4
+00:01:31,000 --> 00:02:03,000
+The topology contains three independent Kind clusters. Each cluster runs a Grid site, consumer gateway, provider gateway, EPP endpoint, and two inference simulators. The consumer gateways form one logical ingress tier, so a request may enter through any of them. Every consumer receives an edge-specific routing overlay and may select an eligible provider gateway in any cluster. The provider gateway then authorizes and forwards the request to its local inference pool.
+
+5
+00:02:03,500 --> 00:02:38,000
+Grid continually converts converged provider state into a versioned routing overlay. The overlay carries eligibility, grouping, effective weights, provenance, and a semantic revision. Praxis validates each update, accepts it, and atomically swaps its in-memory serving state without restarting the gateway. The demo waits until the Grid, accepted, and serving revisions agree before measuring traffic, preventing requests from different routing revisions from being mixed in one result window.
+
+6
+00:02:38,500 --> 00:03:08,000
+The first scenario demonstrates static weighting. Equal capacity and equal pressure produce equal expected shares, with normal statistical variation in the measured sample. The second scenario raises one pool's reported pressure. Grid recalculates the effective weights, publishes a new overlay, and Praxis begins serving it after convergence. A fresh request window then shows whether the measured distribution follows the new routing preference.

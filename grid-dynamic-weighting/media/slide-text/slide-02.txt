@@ -1,0 +1,7 @@
+How Grid Makes a Routing Decision
+
+Eligibility  ->  routing groups  ->  scoring
+       ->  effective weight  ->  weighted selection
+
+Trust, health, freshness, admission, locality,
+and affinity retain precedence.

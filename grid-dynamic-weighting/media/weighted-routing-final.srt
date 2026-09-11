@@ -1,0 +1,67 @@
+1
+00:00:01,000 --> 00:00:28,000
+The following demonstration shows weighted provider selection across multiple Kubernetes clusters. Grid gives platform engineers one logical routing system over independent inference pools. Configured capacity expresses the intended preference, while attributed requests show the distribution actually observed over a finite sample. These values should trend together, but measured traffic will not match the expected percentages exactly.
+
+2
+00:00:28,500 --> 00:00:59,500
+Grid resolves the control-plane decision before a request reaches the weighted picker. It first removes providers that fail model capability, authorization, trust, health, freshness, or admission requirements. The routing policy then determines the first viable selection group, including whether locality or provider score has priority. Existing session affinity is honored next. Only new, unbound requests are distributed by weighted selection among eligible providers in that active group.
+
+3
+00:01:00,000 --> 00:01:30,500
+Static weighting begins with operator-configured relative capacity. In this demo, all three pools start at one hundred, so their baseline shares are equal. Dynamic placement combines that capacity with normalized pressure reported by each pool's simulators through its EPP metrics endpoint. The request sampler does not create queue pressure. It generates inference requests so the resulting provider selections can be measured independently from the configured metrics.
+
+4
+00:01:31,000 --> 00:02:03,000
+The topology contains three independent Kind clusters. Each cluster runs a Grid site, consumer gateway, provider gateway, EPP endpoint, and two inference simulators. The consumer gateways form one logical ingress tier, so a request may enter through any of them. Every consumer receives an edge-specific routing overlay and may select an eligible provider gateway in any cluster. The provider gateway then authorizes and forwards the request to its local inference pool.
+
+5
+00:02:03,500 --> 00:02:38,000
+Grid continually converts converged provider state into a versioned routing overlay. The overlay carries eligibility, grouping, effective weights, provenance, and a semantic revision. Praxis validates each update, accepts it, and atomically swaps its in-memory serving state without restarting the gateway. The demo waits until the Grid, accepted, and serving revisions agree before measuring traffic, preventing requests from different routing revisions from being mixed in one result window.
+
+6
+00:02:38,500 --> 00:03:08,000
+The first scenario demonstrates static weighting. Equal capacity and equal pressure produce equal expected shares, with normal statistical variation in the measured sample. The second scenario raises one pool's reported pressure. Grid recalculates the effective weights, publishes a new overlay, and Praxis begins serving it after convergence. A fresh request window then shows whether the measured distribution follows the new routing preference.
+
+7
+00:03:10,000 --> 00:03:24,000
+The live dashboard begins with the three provider pools and their current routing state.
+
+8
+00:03:30,500 --> 00:03:52,000
+The routing sampler sends real requests through the consumer gateway and measures successful provider selections.
+
+9
+00:03:52,500 --> 00:04:15,000
+With all simulated queues idle, the effective weights are equal and the measured shares vary statistically around equal thirds.
+
+10
+00:04:15,500 --> 00:04:38,000
+The simulator metric is changed independently from request sampling. Grid observes the new metric and publishes a revised effective preference.
+
+11
+00:04:38,500 --> 00:05:02,000
+The dashboard shows the effective weights and expected shares from the served overlay, separately from the measured request sample.
+
+12
+00:05:02,500 --> 00:05:26,000
+The Grid, accepted, and serving revisions converge before the updated routing state is measured.
+
+13
+00:05:26,500 --> 00:05:50,000
+The sampler continues while the routing preference changes. The request results retain provider attribution and latency.
+
+14
+00:05:50,500 --> 00:06:14,000
+The simulated metrics are returned to zero, and the effective weights recover to the equal-capacity baseline.
+
+15
+00:06:14,500 --> 00:06:39,000
+Measured traffic is a finite sample, so its percentages need not equal the expected overlay shares exactly.
+
+16
+00:06:39,500 --> 00:06:43,800
+The recorded dashboard demonstration ends with the recovered routing state.
+
+17
+00:06:44,800 --> 00:07:14,800
+Weighted routing is demonstrated across three independent inference clusters. Configured capacity and live EPP metrics changed Grid's effective weights, Praxis served the converged overlays, and measured requests followed the expected preference without request-path control-plane calls. This concludes the demonstration.

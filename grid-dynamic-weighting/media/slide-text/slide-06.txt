@@ -1,0 +1,7 @@
+From Metric to Served Route
+
+Simulator metric -> EPP observation -> Grid effective weight
+-> versioned overlay -> Praxis accepted and serving revision
+-> weighted selection -> measured attributed traffic
+
+The demo waits for convergence before comparing a new sample.

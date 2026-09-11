@@ -1,0 +1,8 @@
+dist/
+node_modules/
+media/tts/generated/
+media/tts/fitted/
+media/rendered-slides/
+media/final/
+test-results/
+playwright-report/
