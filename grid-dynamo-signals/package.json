@@ -1,0 +1,26 @@
+{
+  "name": "grid-dynamo-signal-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:ui": "vite build --config frontend/vite.config.mjs",
+    "dev:ui": "vite --config frontend/vite.config.mjs",
+    "test:live": "playwright test -c playwright.config.mjs",
+    "render:slides": "node media/scripts/render-slides.mjs",
+    "generate:narration:intro": "node media/scripts/generate-narration.mjs intro",
+    "generate:narration:ui": "node media/scripts/generate-narration.mjs ui",
+    "generate:captions:intro": "node media/scripts/transcribe-narration.mjs intro",
+    "generate:captions:ui": "node media/scripts/transcribe-narration.mjs ui",
+    "build:preview": "node media/scripts/build-preview.mjs",
+    "export:media": "node media/scripts/export-reviewed-assets.mjs",
+    "validate:srt": "node scripts/validate-srt.mjs"
+  },
+  "dependencies": {
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "vite": "8.2.1"
+  }
+}

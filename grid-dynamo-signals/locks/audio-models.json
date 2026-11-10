@@ -1,0 +1,26 @@
+{
+  "verified_at": "2026-11-08T23:10:20.290Z",
+  "account_whisper_hd_name": null,
+  "transcription_model": "whisper-1",
+  "narration_model": "tts-1-hd",
+  "voice": "nova",
+  "account_listed_relevant_models": [
+    "gpt-4o-mini-transcribe",
+    "gpt-4o-mini-transcribe-2025-03-20",
+    "gpt-4o-mini-transcribe-2025-12-15",
+    "gpt-4o-mini-tts",
+    "gpt-4o-mini-tts-2025-03-20",
+    "gpt-4o-mini-tts-2025-12-15",
+    "gpt-4o-transcribe",
+    "gpt-4o-transcribe-diarize",
+    "gpt-live-transcribe",
+    "gpt-realtime-whisper",
+    "gpt-transcribe",
+    "tts-1",
+    "tts-1-1106",
+    "tts-1-hd",
+    "tts-1-hd-1106",
+    "whisper-1"
+  ],
+  "notes": "Historical account /v1/models query. No Whisper-HD API model ID was listed. tts-1-hd is speech generation, not transcription. whisper-1 was available for timestamped verbose_json transcription and is deprecated with planned shutdown 2027-02-26. Recheck account availability before the next API request. No API key material is stored."
+}

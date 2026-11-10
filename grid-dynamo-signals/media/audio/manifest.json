@@ -1,0 +1,101 @@
+{
+  "generatedAt": "2026-11-10T00:23:07.183Z",
+  "model": "gpt-4o-mini-tts",
+  "voice": "marin",
+  "transcriptionModel": "whisper-1",
+  "disclosure": "AI-generated narration; captions transcribed from these reviewed voice tracks.",
+  "loudnessTarget": "EBU R128 integrated -18 LUFS; preview WAV true peak -4 dBTP before AAC encoding",
+  "sources": {
+    "introScript": "media/narration/intro-script.md",
+    "uiScript": "media/narration/ui-walkthrough-script.md",
+    "sourceUiSha256": "f0fe3b6eba384db41e91790e02261e82ca026ef3b8fde7fd1cce958e93472735",
+    "sourceUiDurationSeconds": 93.766
+  },
+  "introTracks": [
+    {
+      "file": "media/audio/intro/slide-01.wav",
+      "durationSeconds": 17.467,
+      "sha256": "d5ac3698fb17b7336351c1e3baa479b41755e07a8c7d0c53674c0b0c92105d8c"
+    },
+    {
+      "file": "media/audio/intro/slide-02.wav",
+      "durationSeconds": 27.2,
+      "sha256": "606ea1425b678b23ec8995bbe9613394dc395067b40bdccdd7d4c071f6e3308d"
+    },
+    {
+      "file": "media/audio/intro/slide-03.wav",
+      "durationSeconds": 28.867,
+      "sha256": "7074a4c17d71ebead9599930854c3015973da7d4da3bf220d07602aa58629b26"
+    },
+    {
+      "file": "media/audio/intro/slide-04.wav",
+      "durationSeconds": 20.7,
+      "sha256": "d20feecffeb6aff3080bb5fd5eaab72df84eb0629058a5e3207d84639f9a4ff9"
+    },
+    {
+      "file": "media/audio/intro/slide-05.wav",
+      "durationSeconds": 28.1,
+      "sha256": "85fcb600fa0494d1f8043d336b1ebd2d06d2a9e4bdb4b6575f4869e2b27e0876"
+    }
+  ],
+  "introCaptions": {
+    "file": "media/captions/intro.srt",
+    "sha256": "6a4ff86b3a6e85e65cd3ce5dad14f568cce000ff0e59e9701247be8956213614"
+  },
+  "uiTrack": {
+    "file": "media/audio/ui-walkthrough.wav",
+    "durationSeconds": 93.766,
+    "sha256": "593db10d21fcb4ef715d4ec42054c6827a429633b1a54b028d02b7f37b0bce15"
+  },
+  "uiSections": [
+    {
+      "track": "ui-01.wav",
+      "startSeconds": 0,
+      "endSeconds": 12
+    },
+    {
+      "track": "ui-02.wav",
+      "startSeconds": 12,
+      "endSeconds": 25
+    },
+    {
+      "track": "ui-03.wav",
+      "startSeconds": 27,
+      "endSeconds": 30
+    },
+    {
+      "track": "ui-04.wav",
+      "startSeconds": 30,
+      "endSeconds": 39
+    },
+    {
+      "track": "ui-05.wav",
+      "startSeconds": 39,
+      "endSeconds": 62
+    },
+    {
+      "track": "ui-06.wav",
+      "startSeconds": 62,
+      "endSeconds": 66
+    },
+    {
+      "track": "ui-07.wav",
+      "startSeconds": 66,
+      "endSeconds": 80
+    },
+    {
+      "track": "ui-08.wav",
+      "startSeconds": 83,
+      "endSeconds": 90
+    },
+    {
+      "track": "ui-09.wav",
+      "startSeconds": 90,
+      "endSeconds": 93.76599999999999
+    }
+  ],
+  "uiCaptions": {
+    "file": "media/captions/ui-walkthrough.srt",
+    "sha256": "1b046d8f0f065522b392984a31026cbf32143ebb73fab496e80de033851cbfb8"
+  }
+}

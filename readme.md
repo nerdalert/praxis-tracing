@@ -62,6 +62,10 @@ Jaeger and Kubernetes are available. Missing live sources are shown as
   gateway image.
 - `components/demos/` — the GLB, combined-site, and llm-d pool-metrics demo
   assets. MAAS demos are intentionally not included.
+- `grid-dynamo-signals/` — adapted static/weighted demo UI, live Dynamo
+  Frontend signal view, presenter controls, proof contract, and media sources.
+  Its Hub local overlay and Site Gateway cross-site snapshot are shown as
+  separate routing paths.
 - `scripts/` — Jaeger/OTel, synthetic POC, real Praxis, and validation
   orchestration.
 

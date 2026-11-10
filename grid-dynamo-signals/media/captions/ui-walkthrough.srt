@@ -1,0 +1,103 @@
+1
+00:00:00,000 --> 00:00:02,300
+Three Dynamo Frontends are ready:
+
+2
+00:00:03,020 --> 00:00:05,700
+Pool A and Pool B at Hub, Remote Pool at Site.
+
+3
+00:00:06,300 --> 00:00:07,060
+Hub ranks locally;
+
+4
+00:00:07,840 --> 00:00:10,260
+Site Gateway includes Remote Pool in a separate
+snapshot.
+
+5
+00:00:12,720 --> 00:00:15,000
+The Site Gateway sample is underway.
+
+6
+00:00:15,520 --> 00:00:19,360
+Each card separates its cumulative request counter
+from requests attributed to
+
+7
+00:00:19,360 --> 00:00:20,060
+this sample.
+
+8
+00:00:20,460 --> 00:00:21,640
+This is an observed outcome,
+
+9
+00:00:22,400 --> 00:00:23,420
+not a weighted-share test.
+
+10
+00:00:27,000 --> 00:00:29,040
+Pool B pressure begins.
+
+11
+00:00:30,000 --> 00:00:32,540
+Pool B reaches four active requests.
+
+12
+00:00:33,440 --> 00:00:34,640
+Remote pressure begins next;
+
+13
+00:00:35,260 --> 00:00:36,680
+four is the comparison reference.
+
+14
+00:00:39,000 --> 00:00:41,100
+As the Site Gateway sample advances,
+
+15
+00:00:42,000 --> 00:00:46,080
+requests are attributed to Pool A while Pool B and
+Remote Pool remain at zero.
+
+16
+00:00:46,660 --> 00:00:49,340
+The Hub's published and consumed revisions match.
+
+17
+00:01:02,000 --> 00:01:04,060
+Remote Pool pressure is active;
+
+18
+00:01:04,780 --> 00:01:05,620
+recovery begins.
+
+19
+00:01:06,000 --> 00:01:09,580
+Remote Pool returns with a fresh zero-active
+signal.
+
+20
+00:01:11,340 --> 00:01:12,720
+Scores and counters stay visible.
+
+21
+00:01:13,560 --> 00:01:15,320
+This remains the historical capture.
+
+22
+00:01:23,000 --> 00:01:24,840
+The final sample is still running.
+
+23
+00:01:25,540 --> 00:01:27,200
+Counts follow response attribution.
+
+24
+00:01:30,000 --> 00:01:31,400
+Eighteen valid responses;
+
+25
+00:01:31,920 --> 00:01:32,740
+all pools idle.
