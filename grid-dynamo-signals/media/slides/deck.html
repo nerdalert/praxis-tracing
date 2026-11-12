@@ -2,104 +2,195 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Grid × Dynamo Frontend Signals — Introduction</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Grid × Dynamo — revised demo slides</title>
 <style>
-:root{--bg:#0b111b;--panel:#111d2b;--line:#34465b;--text:#eef4fb;--muted:#a3b4c8;--cyan:#73e0d1;--blue:#82beff;--amber:#f0c36b;--green:#6bddad;--red:#ff8e83;--ink:#101a26;--sans:Inter,"Segoe UI",sans-serif;--mono:"Cascadia Code","SFMono-Regular",monospace}
-*{box-sizing:border-box}html,body{margin:0;background:#050a11;color:var(--text);font-family:var(--sans)}body{padding:32px;display:grid;gap:34px;place-items:center}.slide{position:relative;width:1600px;height:900px;overflow:hidden;padding:64px 86px 158px;background:radial-gradient(900px 420px at 85% -5%,#162b3e 0,transparent 70%),linear-gradient(150deg,#101b29,#0a111b 60%);border:1px solid #233348;box-shadow:0 18px 70px #0008}.slide:before{content:"";position:absolute;inset:0 0 auto;height:5px;background:linear-gradient(90deg,var(--cyan),var(--blue),var(--amber))}.head{display:flex;align-items:center;justify-content:space-between;margin-bottom:36px}.brand{font:700 15px var(--mono);letter-spacing:.12em;color:#d7e5f5}.brand b{color:var(--cyan)}.num{color:#8598ad;font:12px var(--mono);letter-spacing:.15em}.eyebrow{color:var(--cyan);font:12px var(--mono);letter-spacing:.2em;text-transform:uppercase}.slide h1{max-width:1280px;margin:12px 0 15px;font-size:54px;line-height:1.07;letter-spacing:-.045em}.lead{max-width:1200px;margin:0;color:#b9c8d9;font-size:22px;line-height:1.5}.content{margin-top:46px}.caption-safe{position:absolute;left:0;right:0;bottom:0;height:116px;padding:29px 86px;border-top:1px solid #29394d;background:linear-gradient(180deg,#111a26,#0b111b);display:flex;justify-content:space-between;align-items:flex-start;color:#8497ac;font:12px var(--mono)}.caption-safe strong{color:#bfd0e2;font-weight:500}.footnote{color:#75899f}.grid{display:grid;gap:18px}.node{position:relative;padding:20px 22px;border:1px solid var(--line);border-radius:13px;background:linear-gradient(150deg,#172638,#101a27);min-width:0}.node h3{margin:0 0 8px;font-size:20px}.node p{margin:0;color:var(--muted);font-size:15px;line-height:1.45}.tag{display:inline-block;margin:0 7px 5px 0;padding:5px 8px;border:1px solid #42566d;border-radius:7px;color:#c3d3e5;background:#122133;font:12px var(--mono)}.tag.real{border-color:#36796f;color:#96edda;background:#102520}.tag.synthetic{border-color:#866b3a;color:#f1cf82;background:#292216}.arrow{color:#6c849d;font:28px var(--mono);text-align:center}.problem-row{display:grid;grid-template-columns:1fr 150px 1fr;gap:18px;align-items:center}.question{min-height:172px}.question .big{display:block;margin-bottom:8px;color:var(--amber);font-size:31px;font-weight:750;letter-spacing:-.04em}.question.ready .big{color:var(--green)}.decision{display:flex;gap:13px;align-items:center;margin-top:22px}.decision .node{flex:1}.node .sub{color:#89a0b8;font:12px var(--mono)}.architecture{display:grid;grid-template-columns:1fr 1.06fr 1fr;gap:22px;align-items:stretch}.site{padding:20px;border:1px dashed #53667b;border-radius:17px;background:#0d1723}.site>h3{margin:0 0 17px;color:#dce9f5;font:13px var(--mono);letter-spacing:.12em;text-transform:uppercase}.site-stack{display:grid;gap:13px}.operator{border-color:#36796f}.gateway{border-color:#426891}.dynamo{border-color:#847047}.node strong{color:#edf5fd}.site small{display:block;color:#8296ab;font:11px var(--mono);margin-top:10px}.hub{box-shadow:inset 0 0 0 1px #2c6460}.site-remote{box-shadow:inset 0 0 0 1px #3c5f85}.poll{display:flex;align-items:center;justify-content:center;gap:13px;color:#96e6d9;font:13px var(--mono)}.poll i{display:block;width:70px;border-top:2px dashed #5ac9b5;position:relative}.poll i:after{content:"›";position:absolute;right:-2px;top:-17px;font:26px var(--mono);color:#6cdec9}.flow{display:grid;grid-template-columns:1.1fr 35px 1.1fr 35px 1.1fr 35px 1.1fr;align-items:center;gap:6px}.flow .node{min-height:158px;display:flex;flex-direction:column;justify-content:center}.flow .node h3{font-size:17px}.flow .node p{font-size:14px}.flow-label{display:block;margin-top:13px;color:#91a4b8;font:11px var(--mono)}.sequence{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;align-items:stretch}.step{min-height:205px;position:relative}.step .index{color:var(--cyan);font:13px var(--mono)}.step h3{margin:12px 0 8px;font-size:21px}.step p{margin:0;color:var(--muted);font-size:15px;line-height:1.48}.step:not(:last-child):after{content:"→";position:absolute;right:-18px;top:88px;color:#71869c;font:24px var(--mono);z-index:2}.optional{margin-top:17px;padding:15px 19px;border-left:3px solid var(--amber);background:#211d16;color:#d9c58e;font-size:15px}.limits{display:grid;grid-template-columns:1fr 1fr;gap:16px}.proof{grid-column:1/-1}.proofline{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:15px}.proofline .tag{margin:0}.proofline .arrow{font-size:20px}.limits .node h3{font-size:18px}.limits .node p{font-size:14px}.no-claim{border-color:#774c4c;background:#261818}.no-claim h3{color:#ffb3a9}.yes{border-color:#36796f;background:#10231f}.yes h3{color:#9cead7}
-.slide[data-slide="2"] .content{margin-top:24px}.slide[data-slide="2"] h1{font-size:46px}.slide[data-slide="2"] .architecture{gap:16px}.slide[data-slide="2"] .site{padding:15px}.slide[data-slide="2"] .site>h3{margin-bottom:10px}.slide[data-slide="2"] .site-stack{gap:9px}.slide[data-slide="2"] .site .node{padding:13px 15px}.slide[data-slide="2"] .site .node h3{font-size:17px}.slide[data-slide="2"] .site .node p{font-size:13px}.slide[data-slide="2"] .site small{margin-top:7px}
+:root {
+  --bg: #ffffff;
+  --panel: #ffffff;
+  --panel2: #f5f5f5;
+  --line: #c8cdd0;
+  --text: #151515;
+  --muted: #4b4f52;
+  --red: #EE0000;
+  --red-ink: #a00000;
+  --cyan: #4f5961;
+  --green: #326b45;
+  --amber: #825700;
+  --mono: "Cascadia Code", Consolas, monospace;
+  --sans: Inter, "Segoe UI", Arial, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: #eceff1; color: var(--text); font-family: var(--sans); }
+body { display: grid; gap: 32px; justify-content: center; padding: 24px; }
+.slide {
+  position: relative; width: 1600px; height: 900px; overflow: hidden;
+  padding: 62px 82px 145px; background: #fff; border: 1px solid #c8cdd0;
+}
+.slide:before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 8px; background: var(--red); }
+.head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 36px; }
+.brand { color: #222; font: 700 17px var(--mono); letter-spacing: .13em; }
+.brand b { color: var(--red); }
+.num { color: #555b60; font: 13px var(--mono); letter-spacing: .13em; }
+.eyebrow { color: var(--red-ink); font: 700 14px var(--mono); letter-spacing: .17em; text-transform: uppercase; }
+.slide h1 { margin: 11px 0 18px; color: #151515; font-size: 55px; line-height: 1.08; letter-spacing: -.045em; }
+.lead { max-width: 1350px; margin: 0; color: var(--muted); font-size: 23px; line-height: 1.43; }
+.content { margin-top: 38px; }
+.node {
+  min-width: 0; padding: 24px; border: 1px solid var(--line); border-radius: 17px;
+  background: var(--panel); box-shadow: 0 2px 8px rgba(21, 21, 21, .055);
+}
+.node h2, .node h3 { margin: 0 0 11px; color: #222; font-size: 23px; }
+.node p { margin: 0; color: var(--muted); font-size: 18px; line-height: 1.42; }
+.tag {
+  display: inline-block; padding: 7px 10px; border: 1px solid #b9bec2; border-radius: 7px;
+  background: #f5f5f5; color: #333; font: 14px var(--mono);
+}
+.tag.green { border-color: #84a88f; background: #f0f6f1; color: #285b39; }
+.tag.cyan { border-color: #e6a3a3; background: #fff3f3; color: var(--red-ink); }
+.tag.amber { border-color: #c5a768; background: #fff8e8; color: #704900; }
+.arrow { align-self: center; color: var(--red); text-align: center; font: 36px var(--mono); }
+.row { display: grid; align-items: stretch; gap: 15px; }
+.row.three { grid-template-columns: 1fr 55px 1fr 55px 1fr; }
+.row.four { grid-template-columns: 1fr 44px 1fr 44px 1fr 44px 1fr; }
+.row.two { grid-template-columns: 1fr 1fr; gap: 22px; }
+.node.accent-cyan { border-color: #d99595; border-top: 3px solid var(--red); }
+.node.accent-green { border-color: #94ad9b; border-top: 3px solid #477a55; }
+.node.accent-amber { border-color: #c6ae7c; border-top: 3px solid #9a6b12; }
+.note {
+  margin-top: 24px; padding: 18px 22px; border-left: 5px solid var(--red);
+  background: #fff2f2; color: #292929; font-size: 18px; line-height: 1.4;
+}
+.caption-safe {
+  position: absolute; inset: auto 0 0; display: block; height: 200px; padding: 0;
+  border-top: 4px solid var(--red); background: #ffffff; color: transparent; font-size: 0;
+}
+.caption-safe > * { visibility: hidden !important; }
+.hero { display: grid; grid-template-columns: 1.15fr .85fr; gap: 22px; }
+.hero .node { min-height: 318px; }
+.hero .node h2 { font-size: 29px; }
+.diagram { display: flex; align-items: center; justify-content: center; gap: 16px; margin-top: 37px; }
+.diagram .tag { padding: 14px 18px; font-size: 17px; }
+.diagram .arrow { font-size: 31px; }
+.list { display: grid; gap: 14px; }
+.list .node { min-height: 120px; }
+.list .node h3 { margin-bottom: 6px; font-size: 20px; }
+.list .node p { font-size: 17px; }
+.buckets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+.bucket { min-height: 270px; }
+.bucket .big { display: block; margin-bottom: 16px; color: var(--cyan); font: 700 17px var(--mono); }
+.bucket h2 { font-size: 25px; }
+.bucket .examples { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 22px; }
+.framework { display: grid; grid-template-columns: 1fr 75px 1fr; gap: 18px; align-items: center; }
+.framework .node { min-height: 300px; }
+.metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 17px; }
+.metric { padding: 16px; border: 1px solid #d2d5d7; border-radius: 9px; background: #f5f5f5; }
+.metric b { display: block; margin-bottom: 5px; color: #262626; font: 700 16px var(--mono); }
+.metric span { color: #4b4f52; font-size: 15px; }
+.sites { display: grid; grid-template-columns: 1.25fr .8fr; gap: 22px; }
+.site { padding: 23px; border: 2px dashed #aeb4b8; border-radius: 18px; background: #f7f7f7; }
+.site h2 { margin: 0 0 21px; color: var(--red-ink); font: 700 17px var(--mono); letter-spacing: .09em; }
+.site .inner { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+.site .node { min-height: 160px; }
+.site.remote h2 { color: #326b45; }
+.site.remote .inner { grid-template-columns: 1fr; }
+.sequence { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; }
+.sequence .node { min-height: 251px; }
+.sequence .numstep { margin-bottom: 15px; color: var(--red-ink); font: 700 16px var(--mono); }
+.sequence h2 { font-size: 22px; }
+.links { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 30px; }
+.link { color: var(--red-ink); font: 18px var(--mono); word-break: break-word; }
+.outro .content { margin-top: 46px; }
+.outro .lead { font-size: 25px; }
+.slide[data-slide="3"] .content { margin-top: 41px; }
+.slide[data-slide="6"] .content { margin-top: 46px; }
 </style>
 </head>
 <body>
 <section class="slide" data-slide="1">
- <div class="head"><div class="brand">GRID <b>×</b> DYNAMO</div><div class="num">AI-GENERATED NARRATION · 01 / 05</div></div>
- <div class="eyebrow">Why signal-driven routing</div>
- <h1>A pool can be ready and still be busy.</h1>
- <p class="lead">Platform engineers need to see the live serving signal, the routing decision it changes, and the next request that proves the change.</p>
- <div class="content">
-  <div class="problem-row">
-   <div class="node question ready"><span class="big">Ready?</span><h3>Can the model serve?</h3><p>Dynamo Frontend reports model readiness for this model.</p><div class="tag real">model_ready</div></div>
-   <div class="arrow">+</div>
-   <div class="node question"><span class="big">Busy?</span><h3>How much work is active?</h3><p>The Frontend reports its current active-request signal.</p><div class="tag real">active_requests</div></div>
-  </div>
-  <div class="decision">
-   <div class="node"><h3>Observe the pool</h3><p>Keep the signal tied to its provider, model, source time, and declared comparison profile.</p></div><div class="arrow">→</div>
-   <div class="node"><h3>Change the next choice</h3><p>Grid scores and ranks candidates, publishes an overlay, and the Gateway consumes its revision.</p></div>
-   <div class="arrow">→</div><div class="node"><h3>Prove the request</h3><p>Send a new request ID and inspect the route attribution returned by the Gateway.</p></div>
-  </div>
+ <div class="head"><div class="brand">PRAXIS <b>/</b> GRID</div><div class="num">01 / 06</div></div>
+ <div class="eyebrow">Start with the routing problem</div>
+ <h1>One model endpoint. Many serving pools.</h1>
+ <p class="lead">Grid keeps a current view of providers across sites, applies routing policy, and gives the Gateway a versioned choice for the next request.</p>
+ <div class="content hero">
+  <div class="node accent-cyan"><h2>What Grid does</h2><p>Observes provider inventory, eligibility, and supported serving signals. Computes candidates and distributes routing state.</p><div class="diagram"><span class="tag cyan">client request</span><span class="arrow">→</span><span class="tag green">Praxis Gateway</span><span class="arrow">→</span><span class="tag amber">selected pool</span></div></div>
+  <div class="node"><h2>Why it matters</h2><p>A model can exist in several pools. The best place for the next request can change as availability, pressure, and policy change.</p><div class="note">The Gateway reads accepted state locally; it does not scrape a model on every request.</div></div>
  </div>
- <div class="caption-safe" aria-label="Reserved caption area"></div>
+ <div class="caption-safe"><span><strong>Grid:</strong> provider state → policy → versioned route</span><span>PRAXIS / GRID</span></div>
 </section>
 <section class="slide" data-slide="2">
- <div class="head"><div class="brand">GRID <b>×</b> DYNAMO</div><div class="num">ARCHITECTURE · 02 / 05</div></div>
- <div class="eyebrow">Two Kind sites · separate routing views</div>
- <h1>Grid observes; Dynamo serves.</h1>
- <p class="lead">Secure peer polling shares site signals; each Dynamo Frontend discovers its Mocker worker through its own runtime.</p>
- <div class="content architecture">
-  <div class="site hub"><h3>Hub Kind · local site</h3><div class="site-stack">
-   <div class="node operator"><h3>Grid operator</h3><p>Scrapes provider metrics, scores candidates, publishes overlay.</p><small>run-owned · current source image</small></div>
-   <div class="node gateway"><h3>Hub local Gateway</h3><p>Consumes the local A/B overlay and selects between the two pools.</p><small>local route may omit response headers</small></div>
-   <div class="node gateway"><h3>Site Gateway</h3><p>Uses a separate cross-site snapshot that includes the remote pool.</p><small>GridSiteRoute · site/backend when emitted</small></div>
-   <div class="node dynamo"><h3>Dynamo · Pool A + Pool B</h3><p>Independent Frontend + Mocker Pods with separate metrics.</p><small>one dedicated model per Frontend</small></div>
-  </div></div>
-  <div class="site site-remote"><h3>Remote Kind · remote site</h3><div class="site-stack">
-   <div class="poll"><span>mutual TLS</span><i></i><span>site signal relay</span></div>
-   <div class="node operator"><h3>Grid operator</h3><p>Exposes a run-owned signal endpoint and reports peer reachability.</p><small>site identity · fresh signal batch</small></div>
-   <div class="node gateway"><h3>Remote provider Gateway</h3><p>Receives requests selected by the Site Gateway.</p><small>provider-site may be emitted on remote responses</small></div>
-   <div class="node dynamo"><h3>Dynamo · Remote Pool</h3><p>Frontend routes to its Mocker and returns synthetic text.</p><small>pinned Dynamo v1.6.1 planner image</small></div>
-  </div></div>
-  <div class="node" style="align-self:center"><h3>What owns what?</h3><p><strong>Grid</strong> chooses a pool or site from observed signals.<br><br><strong>Dynamo Frontend</strong> chooses its worker.<br><br><strong>Mocker</strong> returns a synthetic completion.</p><div class="tag real">runtime telemetry</div><div class="tag synthetic">synthetic response</div></div>
+ <div class="head"><div class="brand">PRAXIS <b>/</b> GRID</div><div class="num">02 / 06</div></div>
+ <div class="eyebrow">Control plane and peer membership</div>
+ <h1>Operators keep the map current.</h1>
+ <p class="lead">Grid operators reconcile providers, trust, and observations. Peers exchange site state; Gateways serve requests from accepted routing snapshots.</p>
+ <div class="content row three">
+  <div class="node accent-green"><h2>Grid operators</h2><p>Watch provider resources, check freshness and readiness, compute candidate state, and publish revisions.</p><div class="tag green" style="margin-top:25px">reconciliation</div></div><div class="arrow">→</div>
+  <div class="node accent-cyan"><h2>Peer membership</h2><p>SWIM can discover peers and share membership. Declared peers with secure polling are another mode.</p><div class="tag cyan" style="margin-top:25px">site exchange</div></div><div class="arrow">→</div>
+  <div class="node accent-amber"><h2>Praxis Gateways</h2><p>Read current routing state and send each new request to an eligible destination.</p><div class="tag amber" style="margin-top:25px">request path</div></div>
  </div>
- <div class="caption-safe" aria-label="Reserved caption area"></div>
+ <div class="note">This recording uses declared peers and secure signal polling. Live SWIM is part of Grid's architecture, but is not demonstrated here.</div>
+ <div class="caption-safe"><span><strong>Recorded mode:</strong> declared peers + secure polling</span><span>SWIM NOT SHOWN</span></div>
 </section>
 <section class="slide" data-slide="3">
- <div class="head"><div class="brand">GRID <b>×</b> DYNAMO</div><div class="num">SIGNAL CHAIN · 03 / 05</div></div>
- <div class="eyebrow">From actual metric to consumed route</div>
- <h1>Every routing change has a visible owner and revision.</h1>
- <p class="lead">The live UI reads Frontend metrics, operator-published candidates, and the Gateway-mounted overlay independently.</p>
- <div class="content">
-  <div class="flow">
-   <div class="node" style="border-color:#36796f"><span class="tag real">LIVE · /metrics</span><h3>Dynamo Frontend</h3><p><strong>model_ready</strong><br><strong>active_requests</strong></p><span class="flow-label">model-scoped · Frontend-wide activity</span></div><div class="arrow">→</div>
-   <div class="node"><span class="tag">versioned adapter</span><h3>Canonical observation</h3><p>Provider + model identity, source time, freshness, units, and declared profile.</p><span class="flow-label">missing or stale → unknown</span></div><div class="arrow">→</div>
-   <div class="node"><span class="tag">comparison reference · 4</span><h3>Pressure score &amp; rank</h3><p>Comparable active work is evaluated within the configured Dynamo profile.</p><span class="flow-label">candidate A ↔ candidate B</span></div><div class="arrow">→</div>
-   <div class="node" style="border-color:#426891"><span class="tag">revision-bound</span><h3>Overlay → Gateway</h3><p>Published revision and Gateway-consumed revision are checked side by side.</p><span class="flow-label">next request proves route selection</span></div>
-  </div>
-  <div class="decision" style="margin-top:34px">
-   <div class="node"><h3>Actual runtime evidence</h3><p>Metric samples and timestamps come from the Dynamo Frontend endpoint.</p></div><div class="arrow">≠</div><div class="node"><h3>Declared comparison profile</h3><p>Four is the demo's comparison reference. It is not a Mocker replica count, queue limit, or measured serving capacity.</p></div><div class="arrow">→</div><div class="node"><h3>Fresh route evidence</h3><p>Correlate the request ID with active work and revisions. Show emitted headers, or the unique Gateway counter for a headerless Hub route.</p></div>
-  </div>
+ <div class="head"><div class="brand">PRAXIS <b>/</b> GRID</div><div class="num">03 / 06</div></div>
+ <div class="eyebrow">How Praxis gets a routing decision</div>
+ <h1>Three buckets shape the next choice.</h1>
+ <p class="lead">Grid supplies candidate state; Praxis serves the request. Different inputs have different jobs and are used only when configured and comparable.</p>
+ <div class="content buckets">
+  <div class="node bucket accent-green"><span class="big">01 / ELIGIBILITY</span><h2>Can this pool serve?</h2><p>Hard gates and current state determine whether a candidate may be selected.</p><div class="examples"><span class="tag green">readiness</span><span class="tag green">health</span><span class="tag green">trust</span><span class="tag green">freshness</span></div></div>
+  <div class="node bucket accent-amber"><span class="big" style="color:var(--amber)">02 / PRESSURE</span><h2>How busy is it?</h2><p>Supported measurements influence score or rank after eligibility.</p><div class="examples"><span class="tag amber">queue depth</span><span class="tag amber">KV-cache</span><span class="tag amber">active requests</span></div></div>
+  <div class="node bucket accent-cyan"><span class="big">03 / POLICY</span><h2>Where should it go?</h2><p>Deployment intent and request context shape the viable selection group.</p><div class="examples"><span class="tag cyan">region</span><span class="tag cyan">locality</span><span class="tag cyan">affinity</span><span class="tag cyan">capacity</span></div></div>
  </div>
- <div class="caption-safe" aria-label="Reserved caption area"></div>
+ <div class="caption-safe"><span><strong>Examples, not simultaneous demo claims.</strong> The recording exercises Dynamo readiness and active requests.</span><span>PRAXIS / GRID</span></div>
 </section>
 <section class="slide" data-slide="4">
- <div class="head"><div class="brand">GRID <b>×</b> DYNAMO</div><div class="num">DEMO SEQUENCE · 04 / 05</div></div>
- <div class="eyebrow">One presenter control per state change</div>
- <h1>Apply pressure. Probe. Recover.</h1>
- <p class="lead">Each step waits for live evidence before the next action is enabled.</p>
- <div class="content">
-  <div class="sequence">
-   <div class="node step"><span class="index">01 · BASELINE</span><h3>Show two sites</h3><p>Readiness, active requests, comparable capacity, candidate scores, and matching overlay revisions.</p></div>
-   <div class="node step"><span class="index">02 · PRESSURE</span><h3>Apply bounded load</h3><p>Up to four concurrent direct requests go to the selected Mocker. Four is the demo comparison reference, not a Mocker replica count or queue limit.</p></div>
-   <div class="node step"><span class="index">03 · ROUTE</span><h3>Send a fresh probe</h3><p>Inspect the unique request ID, HTTP response, selected site, backend, and emitted headers.</p></div>
-   <div class="node step"><span class="index">04 · RECOVER</span><h3>Release and verify</h3><p>Wait for fresh zero-active metrics, restored rank, and Gateway revision convergence.</p></div>
-   <div class="node step"><span class="index">05 · OPTIONAL LIVE CONTROL</span><h3>Interrupt one signal port</h3><p>Observe local fallback, then restore the peer endpoint. This step is not shown in the supplied recording.</p></div>
-  </div>
-  <div class="optional"><strong>Presenter cue:</strong> If convergence takes longer, leave the UI on “Applying” or “Recovering” and say, “Grid is still waiting for a fresh sample and the Gateway’s consumed revision.” Never narrate a value before it appears live.</div>
+ <div class="head"><div class="brand">PRAXIS <b>/</b> GRID</div><div class="num">04 / 06</div></div>
+ <div class="eyebrow">A pluggable serving framework</div>
+ <h1>llm-d: choose a worker inside a pool.</h1>
+ <p class="lead">llm-d's Endpoint Picker, or EPP, selects a worker. Its pool observations can also inform Grid's site or pool selection.</p>
+ <div class="content framework">
+  <div class="node accent-cyan"><h2>Grid → llm-d pool</h2><p>Grid chooses an eligible pool or site using configured policy and fresh observations.</p><div class="diagram"><span class="tag cyan">Grid route</span><span class="arrow">→</span><span class="tag green">EPP</span></div></div><div class="arrow">→</div>
+  <div class="node accent-green"><h2>EPP → model worker</h2><p>Examples of llm-d/EPP observations:</p><div class="metric-grid"><div class="metric"><b>waiting requests</b><span>queue pressure</span></div><div class="metric"><b>KV-cache use</b><span>memory pressure</span></div><div class="metric"><b>endpoint ready</b><span>eligibility</span></div><div class="metric"><b>worker choice</b><span>within-pool routing</span></div></div></div>
  </div>
- <div class="caption-safe" aria-label="Reserved caption area"></div>
+ <div class="note">llm-d explains the swappable framework contract. The upcoming recording runs Dynamo Frontend + Mocker, not llm-d.</div>
+ <div class="caption-safe"><span><strong>llm-d:</strong> EPP worker selection and pool signals</span><span>NOT DEPLOYED IN THIS RECORDING</span></div>
 </section>
 <section class="slide" data-slide="5">
- <div class="head"><div class="brand">GRID <b>×</b> DYNAMO</div><div class="num">PROOF &amp; LIMITS · 05 / 05</div></div>
- <div class="eyebrow">What the viewer can verify</div>
- <h1>Show the signal, decision, revision, and request together.</h1>
- <p class="lead">The historical recording shows a real routing response to live Frontend signals, with precise limits on what it proves.</p>
- <div class="content limits">
-  <div class="node yes"><h3>Evidence shown in the recorded run</h3><p>Source hash and pinned image identities · Frontend readiness and active requests · capacity/profile · Grid score and rank · published overlay revision · Gateway-consumed revision · fresh request ID and emitted route attribution · zero-active recovery.</p></div>
-  <div class="node"><h3>Historical UI recording</h3><p>The supplied screen recording is from the completed run shown in its run badge. Its LIVE labels describe the capture time; they do not describe a current deployment. In a current run, LIVE values need a fresh source time, STALE keeps its age visible, UNAVAILABLE has no numeric value, and CONFIGURED marks the declared comparison profile.</p></div>
-  <div class="node yes proof"><h3>Correlated proof chain</h3><div class="proofline"><span class="tag real">Frontend /metrics sample</span><span class="arrow">→</span><span class="tag">Grid candidate score / rank</span><span class="arrow">→</span><span class="tag">published revision</span><span class="arrow">→</span><span class="tag">Gateway consumed revision</span><span class="arrow">→</span><span class="tag">request ID + route evidence actually emitted</span></div></div>
-  <div class="node no-claim"><h3>What this does not prove</h3><p>Mocker returns synthetic inference responses. This is not GPU saturation, model quality, or a weighted-share precision test.</p></div>
-  <div class="node no-claim"><h3>Keep the failure story precise</h3><p>Optional interruption changes one declared peer signal endpoint. It is not a network ACL or live SWIM demonstration. Frontend stage counts are not llm-d/EPP queues.</p></div>
+ <div class="head"><div class="brand">PRAXIS <b>/</b> GRID</div><div class="num">05 / 06</div></div>
+ <div class="eyebrow">The framework in this recording</div>
+ <h1>A pool can be ready and still be busy.</h1>
+ <p class="lead">Each Dynamo pool has its own Frontend and Mocker. Readiness and activity answer different questions.</p>
+ <div class="content row two">
+  <div class="node accent-green"><h2>Can it serve this model?</h2><p><span class="tag green">dynamo_frontend_model_ready{model}</span></p><p style="margin-top:18px">A model-scoped readiness signal. Ready does not mean idle.</p></div>
+  <div class="node accent-amber"><h2>How much work is active?</h2><p><span class="tag amber">dynamo_frontend_active_requests</span></p><p style="margin-top:18px">Frontend-wide active work. The demo gives each Frontend one model and compares it with a declared reference of four.</p></div>
  </div>
- <div class="caption-safe" aria-label="Reserved caption area"></div>
+ <div class="note">Dynamo stage gauges provide extra processing detail. They are not llm-d queues, KV-cache utilization, measured capacity, or GPU saturation. Mocker returns synthetic responses.</div>
+ <div class="caption-safe"><span><strong>Real metrics:</strong> model readiness + active requests. <strong>Synthetic inference:</strong> Mocker.</span><span>DYNAMO FRONTEND</span></div>
+</section>
+<section class="slide" data-slide="6">
+ <div class="head"><div class="brand">PRAXIS <b>/</b> GRID</div><div class="num">06 / 06</div></div>
+ <div class="eyebrow">What the next 94 seconds will show</div>
+ <h1>Baseline → pressure → route shift → recovery.</h1>
+ <p class="lead">Two local pools and one remote pool. Watch Frontend metrics, Grid scores, Gateway revisions, and attributed requests.</p>
+ <div class="content sequence">
+  <div class="node accent-green"><div class="numstep">01 / BASELINE</div><h2>No pressure</h2><p>Send requests; observe all three pools receiving traffic.</p></div>
+  <div class="node accent-amber"><div class="numstep">02 / PRESSURE</div><h2>Pool B + remote</h2><p>Direct Mocker work raises both Frontends' active-request metrics.</p></div>
+  <div class="node accent-cyan"><div class="numstep">03 / ROUTE</div><h2>Pool A favored</h2><p>Fresh Grid state and new requests show the unpressured route.</p></div>
+  <div class="node accent-green"><div class="numstep">04 / RECOVERY</div><h2>Release + resample</h2><p>Metrics return to zero; a new sample reaches all three pools again.</p></div>
+ </div>
+ <div class="note">Traffic is observed across pools after recovery. This is not an equal-share or weighted-share precision test.</div>
+ <div class="caption-safe"><span><strong>Proof path:</strong> Frontend metric → Grid score → Gateway revision → attributed request</span><span>DEMO NEXT</span></div>
+</section>
+<section class="slide outro" data-slide="outro">
+ <div class="head"><div class="brand">PRAXIS <b>/</b> GRID</div><div class="num">THANKS FOR WATCHING</div></div>
+ <div class="eyebrow">One routing interface, multiple serving frameworks</div>
+ <h1>The pool behind the route can change.</h1>
+ <p class="lead">This recording used Dynamo Frontend signals. A deployment can instead use llm-d and EPP signals when its adapter, model route, and policy match. Grid keeps the routing contract; signal semantics stay explicit.</p>
+ <div class="content row two">
+  <div class="node accent-cyan"><h2>Explore the projects</h2><div class="links"><span class="link">github.com/praxis-proxy/grid</span><span class="link">github.com/praxis-proxy/ai</span><span class="link">github.com/praxis-proxy/praxis</span><span class="link">github.com/praxis-proxy</span></div></div>
+  <div class="node accent-green"><h2>What this demo proved</h2><p>A fresh serving signal changed Grid's decision, the Gateway consumed current routing state, and attributed requests followed the shift and recovery.</p><div class="note">Thanks for watching.</div></div>
+ </div>
+ <div class="caption-safe"><span><strong>Framework choice:</strong> Dynamo or llm-d, with a compatible Grid adapter and policy.</span><span>PRAXIS / GRID</span></div>
 </section>
 </body>
 </html>

@@ -1,51 +1,54 @@
-# Recorded UI walkthrough narration
+# Revised recorded-UI narration and caption wording
 
-This narration follows the supplied 93.766-second screen recording. The UI
-recording is from the run shown in its badge: `20261108T214611Z`. Its `LIVE`
-labels describe the capture time. They do not describe a current deployment.
-The script avoids claims about values or actions that are not visible in the
-recording.
+Times are relative to the first frame of the **93.766-second original UI
+recording** `grid-dynamo-v1.mp4`. They are editorial windows, not final SRT
+timestamps. The compiler should keep the recording at natural speed, place
+each voice segment inside its visual window without overlap, then align final
+captions to the actual audio.
 
-## 00:00–00:12 — Baseline
+## 00:00–00:12 — Baseline state
 
-Three Dynamo Frontends are ready: Pool A and Pool B at Hub, Remote Pool at
-Site. Hub ranks locally; Site Gateway includes Remote Pool in a separate
-snapshot.
+All three Dynamo pools are ready and idle. The Hub overlay ranks local pools;
+a separate Site Gateway view includes the remote pool.
 
-## 00:12–00:25 — New requests
+## 00:12–00:27 — No-pressure request sample
 
-The Site Gateway sample is underway. Each card separates its cumulative
-request counter from requests attributed to this sample. This is an observed
-outcome, not a weighted-share test.
+Before pressure, we send a fresh sample. The counters show requests reaching
+Pool A, Pool B, and the remote pool. This is observed routing, not an
+equal-share claim.
 
-## 00:27–00:30 — Pool B pressure starts
+## 00:27–00:39 — Apply pressure to Pool B and remote pool
 
-Pool B pressure begins.
+Now we load Pool B and the remote pool directly through Mocker. Frontend
+active-request metrics rise while Pool A stays unpressured.
 
-## 00:30–00:39 — Pressure appears
+## 00:39–01:02 — Route after the metrics change
 
-Pool B reaches four active requests. Remote pressure begins next; four is the
-comparison reference.
+Grid receives fresh metrics and changes its scores. The Hub's published and
+consumed overlay revisions match. New Site Gateway requests shift toward
+Pool A; attributed counters show the chosen pool. The local overlay and
+cross-site snapshot remain distinct.
 
-## 00:39–01:02 — Route sample under pressure
+## 01:02–01:22 — Release pressure
 
-As the Site Gateway sample advances, requests are attributed to Pool A while
-Pool B and Remote Pool remain at zero. The Hub's published and consumed
-revisions match.
+We release direct work. Pool B and the remote Frontend return toward zero
+active requests. Grid waits for fresh observations before the routes count
+as recovered. Now the recovery sample runs; watch the per-pool counters update
+as responses arrive.
 
-## 01:02–01:06 — Remote Pool release begins
+## 01:22–01:33.766 — Fresh sample after recovery
 
-Remote Pool pressure is active; recovery begins.
+A final sample reaches all three pools again. That shows recovery, not a
+guaranteed traffic share or GPU benchmark.
 
-## 01:06–01:20 — Release and recovery
+## Caption text policy
 
-Remote Pool returns with a fresh zero-active signal. Scores and counters stay
-visible. This remains the historical capture.
-
-## 01:23–01:30 — Final sample in progress
-
-The final sample is still running. Counts follow response attribution.
-
-## 01:30–01:33.766 — Completed sample
-
-Eighteen valid responses; all pools idle.
+- Caption the **spoken words above**, not stale wording from the old five
+  slides. Keep `Grid`, `Praxis`, `Dynamo`, `Frontend`, `Mocker`, `llm-d`, `EPP`,
+  `SWIM`, `Pool A`, `Pool B`, and `remote pool` spelled consistently.
+- Break captions at phrase boundaries; aim for at most two readable lines.
+- No cue may extend beyond its corresponding narration or into the next
+  section. Check the caption-safe area in the actual final render.
+- If a statement about the baseline or final all-pool sample cannot be
+  confirmed in the source recording, narrow the wording before generating
+  voice or captions. Do not change the video to manufacture that claim.

@@ -1,21 +1,67 @@
-# Five-slide introduction narration
+# Grid × Dynamo revised introduction: spoken text
 
-## Slide 1 — Signals change where the next request goes
+Use each numbered section as one slide voice segment. The compiler must time
+the slide to its **actual** generated narration and then derive SRT timestamps
+from the final audio. These words are the intended caption text; punctuation
+may be adjusted for short readable cues, but technical terms must remain.
 
-This presentation uses AI-generated narration. A pool can be ready and still be busy. Dynamo Frontend reports readiness and active requests. Grid uses those signals to change how it ranks serving pools, and a new request shows the route it took.
+## Slide 1 — What Grid does
 
-## Slide 2 — Two sites, three independent pools
+Grid connects one model endpoint to serving pools across sites. It tracks
+which providers are usable, evaluates routing policy and current signals, and
+publishes a versioned routing view. The Gateway uses that view to choose the
+next destination; it does not scrape a model on every request.
 
-The recorded setup has two Kind sites. The Hub site contains Dynamo Pool A and Pool B. The separate Site cluster contains the Remote Pool. Each pool runs an independent Dynamo Frontend with a Mocker worker. Grid chooses a pool or site from its signals; Dynamo Frontend chooses its worker. Mocker returns synthetic inference text, so this setup does not measure GPU performance.
+## Slide 2 — Operators, peers, and SWIM
 
-## Slide 3 — Follow each routing boundary
+Grid operators reconcile provider inventory, trust, signals, and routing
+state. SWIM is one way sites can discover and exchange membership. In this
+recording, the two sites instead use declared peers and secure signal polling.
+The recording does not demonstrate live SWIM. The Gateway serves requests
+from the latest accepted routing state.
 
-Dynamo Frontend exports real model readiness and active-request metrics. Grid's versioned adapter checks provider and model identity, source time, and freshness before it compares pressure. Four is the configured comparison reference in this demo. It is not a queue limit or measured capacity. The Hub's local overlay ranks Pool A and Pool B. The Site Gateway reads a separate cross-site snapshot that includes the Remote Pool.
+## Slide 3 — Praxis and the decision inputs
 
-## Slide 4 — Pressure changes the observed route
+Praxis is the request-serving Gateway. Grid supplies candidate state for its
+routing filters. Think of the inputs in three buckets: eligibility, such as
+readiness, health, trust, and freshness; pressure, such as queue depth,
+KV-cache use, or active requests; and policy, such as region, locality,
+affinity, and configured capacity. Different serving frameworks expose
+different measurements. Only configured, comparable inputs influence a given
+decision.
 
-The presenter starts pressure manually from a pool card. The recording shows pressure on Pool B and the Remote Pool while a new Site Gateway sample is running. The screen shows Frontend activity, candidate order, request counts, and the published and consumed Hub overlay revisions. It does not claim a precise weighted share.
+## Slide 4 — llm-d as one serving framework
 
-## Slide 5 — Keep the proof and its limits together
+With llm-d, an Endpoint Picker, or EPP, chooses a worker within a pool. Its
+signals can include waiting requests, KV-cache utilization, and endpoint
+readiness. Grid can use those pool observations to choose between sites or
+pools. This slide explains another supported integration; the recording that
+follows uses Dynamo, not llm-d.
 
-The recorded screen is from a completed run on November eighth, twenty twenty-six. Its live badges describe that capture; they do not describe a current deployment. Mocker responses are synthetic, while the Frontend signals are real. The recording does not prove GPU saturation, model quality, weighted-share precision, or live SWIM behavior. Frontend stage counts are not llm-d or EPP queues.
+## Slide 5 — Dynamo: ready is not idle
+
+A Dynamo pool can be ready to serve and still be busy. In this demo, each pool
+has a dedicated Frontend and Mocker. The Frontend reports model readiness and
+its active request count. Grid checks freshness and compares active work with
+a configured reference of four. The stage gauges give more detail, but they
+are not llm-d queues or GPU utilization. Mocker returns synthetic responses.
+
+## Slide 6 — What you are about to see
+
+First, we send a request sample with no pool under pressure and observe
+requests reaching all three pools. Then we load Pool B and the remote pool.
+Their Dynamo Frontend active-request metrics rise; Grid updates its routing
+view, and the next sample favors unpressured Pool A. Finally, we release the
+load and send another sample. All three pools appear again. The recording
+shows a routing shift, not an equal-share guarantee.
+
+## Voice direction
+
+- Clear, conversational technical narration. Leave a short pause after each
+  slide's first sentence and before switching to the recorded UI.
+- Pronounce “llm-d” as “L-L-M-D”, “EPP” as “E-P-P”, “SWIM” as “swim”, and
+  “Praxis” as “PRAK-sis”.
+- Keep the same voice and loudness across introduction, UI walkthrough, and
+  outro. Do not add overlapping voice tracks or music under technical speech.
+- The on-screen slide content is a visual aid, not a transcript. Use the text
+  above as the voice and caption source.

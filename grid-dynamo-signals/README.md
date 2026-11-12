@@ -37,17 +37,22 @@ The live Playwright suite can create real Mocker pressure and requests. Run it o
 
 ## Slides and media
 
-The five-slide introduction has editable PowerPoint shapes at `media/source-deck/grid-dynamo-intro.pptx` and editable HTML at `media/slides/deck.html`. Rebuild the PowerPoint deck with Python and `media/source-deck/requirements.txt`. Render the HTML slides at 1920×1080 with `npm run render:slides -- media/slides/rendered`.
-
-Narration source is under `media/narration/`; reviewed AI-generated voice tracks are under `media/audio/`, and word-timed captions are under `media/captions/`. The HTML slides disclose AI-generated narration. The local preview combines these assets with the supplied historical UI recording and includes an English soft-caption track. Its MP4 and the raw recording stay outside Git. Use [RECORDING-HANDOFF.md](docs/RECORDING-HANDOFF.md) for preview assembly and [AUDIO-MODEL-STATUS.md](docs/AUDIO-MODEL-STATUS.md) for the exact models and their support status. Reusable production tooling is in [Traffic Theater](https://github.com/nerdalert/traffic-theater/tree/main/examples/grid-dynamo-signals).
-
-After generating or reviewing narration and captions, assemble a local preview with:
+The revised deck has six introduction slides and one exit slide in editable
+HTML at `media/slides/deck.html`. The six introduction slides and exit explain
+Grid, the routing inputs, the Dynamo signals shown in the recording, and the
+scope of the evidence. Render them at 1920×1080 with:
 
 ```sh
-npm run build:preview -- \
-  --ui /path/to/grid-dynamo-v1.mp4 \
-  --output /path/to/local-preview
+npm run render:slides -- --output media/generated/slides/1920x1080
 ```
 
-The builder places each caption section on its source timecode, preserves
-recording and speech speed, and fails if a voice segment exceeds its window.
+The narration scripts are under `media/narration/`; reviewed caption wording
+is under `media/captions/caption-copy.md`. The revised local preview uses one
+consistent AI voice, the original historical UI capture, and a soft English
+caption track. It retains the recording's natural speed, starts on slide one
+with a one-second pause before narration, and ends with two seconds of black.
+Keep the final MP4, source recording,
+and generated intermediates outside Git. Follow [media/captions/README.md](media/captions/README.md)
+to regenerate and assemble the local preview. The saved live qualification is
+historical; the recording does not demonstrate live SWIM, llm-d deployment,
+GPU utilization, or equal-share precision.

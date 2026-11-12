@@ -16,10 +16,10 @@ passes.
 
 The intended local URL is **http://127.0.0.1:4177** after a verified startup.
 The supplied source clip `grid-dynamo-v1.mp4` is a silent 93.766-second
-1920×1080 historical recording; it is not a current deployment. A local
-preview combines five narrated slides, a time-aligned UI voiceover, and
-reviewed captions. Keep the source clip and preview MP4 outside Git. The user
-will handle any later edit or upload.
+1920×1080 historical recording; it is not a current deployment. The revised
+local preview combines six narrated introduction slides, a time-aligned UI
+voiceover, a narrated exit slide, and reviewed captions. Keep the source clip
+and preview MP4 outside Git. The user will handle any later edit or upload.
 
 ## Dashboard and claims
 
@@ -69,9 +69,10 @@ static asset checks are separate gates.
 
 ## Local preview captions
 
-The current preview's SRT is transcribed from the generated voiceover and
-aligned to the historical UI recording's scene markers. The editable source
-captions and audio are in `media/captions/` and `media/audio/`. To rebuild the
+The revised preview's SRT wording comes from the approved copy in
+`media/captions/caption-copy.md`; its cue timestamps are aligned to word-level
+transcription of each generated voice section. The editable narration and
+caption copy are in `media/narration/` and `media/captions/`. To rebuild the
 local preview from generated narration and the source UI file, run the steps in
 `media/captions/README.md`.
 

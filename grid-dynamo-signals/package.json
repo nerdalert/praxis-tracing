@@ -7,10 +7,13 @@
     "dev:ui": "vite --config frontend/vite.config.mjs",
     "test:live": "playwright test -c playwright.config.mjs",
     "render:slides": "node media/scripts/render-slides.mjs",
+    "verify:audio-models": "node media/scripts/verify-audio-models.mjs",
     "generate:narration:intro": "node media/scripts/generate-narration.mjs intro",
     "generate:narration:ui": "node media/scripts/generate-narration.mjs ui",
+    "generate:narration:outro": "node media/scripts/generate-narration.mjs outro",
     "generate:captions:intro": "node media/scripts/transcribe-narration.mjs intro",
     "generate:captions:ui": "node media/scripts/transcribe-narration.mjs ui",
+    "generate:captions:outro": "node media/scripts/transcribe-narration.mjs outro",
     "build:preview": "node media/scripts/build-preview.mjs",
     "export:media": "node media/scripts/export-reviewed-assets.mjs",
     "validate:srt": "node scripts/validate-srt.mjs"

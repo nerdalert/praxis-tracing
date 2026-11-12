@@ -1,37 +1,53 @@
 # Narration, captions, and local preview
 
-The five slide voiceovers and nine timecoded UI voiceover sections come from
-the editable scripts in `media/narration/`. Narration is generated with the
-`gpt-4o-mini-tts` API and voice `marin`; captions use `whisper-1` word timing.
-Slide one discloses AI-generated narration.
+The editable sources define six introduction slides, six timed UI narration
+sections, one exit narration, and reviewed caption wording:
 
-Generate, transcribe, review, and assemble the local preview with the supplied
-historical UI recording:
+- media/slides/deck.html
+- media/narration/intro-script.md
+- media/narration/ui-walkthrough-script.md
+- media/narration/outro-script.md
+- media/captions/caption-copy.md
 
-```bash
-OPENAI_API_KEY=... npm run generate:narration:intro
-OPENAI_API_KEY=... npm run generate:narration:ui
-OPENAI_API_KEY=... npm run generate:captions:intro
-OPENAI_API_KEY=... npm run generate:captions:ui
-npm run build:preview -- --ui /path/to/grid-dynamo-v1.mp4 --output /local/preview
-npm run export:media -- --ui /path/to/grid-dynamo-v1.mp4
-npm run validate:srt -- /local/preview/grid-dynamo-signals-preview.srt \
-  --media /local/preview/grid-dynamo-signals-preview.mp4
-```
+One gpt-4o-mini-tts voice (marin) narrates all sections. whisper-1 supplies
+word timestamps from the generated audio; caption text and punctuation come
+from caption-copy.md. The model check queries the account's available models
+and reports only whether the configured speech and transcription model IDs
+are available.
 
-Whisper supplies word timings; the exact narration script supplies caption
-text and punctuation. The timing script maps the source words onto Whisper's
-ordered timestamps, reports recognition spelling differences, and fails if
-the timestamped word count differs from the script. To rebuild captions from
-a saved Whisper response without another API request, pass `--reuse-json` to
-the transcription script.
+Set OPENAI_API_KEY in the local environment without putting its value in a
+command, file, or log. Render and build with the historical 93.766-second
+source UI capture:
 
-The MP4 contains an English soft-caption track, and the SRT remains available
-beside it. The builder aligns UI speech and captions to the source timecodes,
-preserves video and speech speed, and fails if a spoken section exceeds its
-window. It normalizes the full preview mix to -18 LUFS with -4 dBTP headroom
-before AAC encoding and adds two seconds of silent black at the beginning and
-end. `npm run export:media` extracts the reviewed WAV tracks
-from that normalized mix and writes SRT source assets into `media/audio/` and
-`media/captions/`. Keep the source recording, generated intermediates, and
-preview MP4 outside Git.
+    npm run verify:audio-models
+    npm run render:slides -- --output media/generated/slides/1920x1080
+    npm run generate:narration:intro
+    npm run generate:narration:ui
+    npm run generate:narration:outro
+    npm run generate:captions:intro
+    npm run generate:captions:ui
+    npm run generate:captions:outro
+    npm run build:preview -- \
+      --ui /path/to/grid-dynamo-v1.mp4 \
+      --output /path/to/local-output
+    npm run validate:srt -- \
+      /path/to/local-output/grid-dynamo-signals-final.srt \
+      --media /path/to/local-output/grid-dynamo-signals-final.mp4
+    npm run export:media -- --preview-dir \
+      /path/to/local-output
+
+The builder checks that approved caption words match the narration, aligns
+cues to Whisper's word times, and fails if a cue crosses a slide or UI section
+boundary. It places each voice clip exactly once in visual order; it does not
+mix tracks, add music, or add a second narration. UI speech stays inside the
+six editorial windows and the recording stays at its native speed. The video
+has one voice stream, one English soft-caption stream, and a matching sidecar
+SRT. A caption-safe band is reserved on the slides and in the UI letterbox.
+The first frame shows slide one. Its narration starts after a one-second pause;
+the cut ends with two seconds of black.
+
+media/generated is ignored and holds local intermediate audio, transcripts,
+and rendered frames. The final video, WAV, SRT, preview manifest, source
+recording copy, and exported editable sources are written outside the
+checkout. The tracked media/audio files are legacy assets and are not inputs
+to this revised build.
